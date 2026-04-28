@@ -17,7 +17,15 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QPixmap, QPixmapCache
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPixmapCache,
+)
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -30,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from geotrace.database.manager import DatabaseManager
+from geotrace.ui.theme import Colors, Fonts
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +133,7 @@ class PhotoListModel(QAbstractListModel):
 
 
 class ThumbnailDelegate(QStyledItemDelegate):
-    """照片缩略图绘制代理 — 集成 QPixmapCache 内存缓存."""
-
-    PLACEHOLDER_KEY = "__geotrace_placeholder__"
+    """照片缩略图绘制代理 — 卡片风格 + QPixmapCache 内存缓存."""
 
     def paint(self, painter, option, index: QModelIndex) -> None:
         if not index.isValid():
@@ -136,37 +143,66 @@ class ThumbnailDelegate(QStyledItemDelegate):
         thumbnail_path = index.data(Qt.UserRole + 2)
         photo_name = index.data(Qt.DisplayRole)
 
-        # 绘制选中/悬停背景
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 卡片边距和圆角
+        card_margin = 6
+        card_rect = option.rect.adjusted(card_margin, card_margin, -card_margin, -card_margin)
+
+        # 卡片投影
+        shadow_color = QColor(0, 0, 0, 25)
+        shadow_rect = card_rect.translated(0, 2)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(shadow_color)
+        painter.drawRoundedRect(shadow_rect, 8, 8)
+
+        # 卡片主体背景
         if option.state & QStyle.State_Selected:
-            painter.fillRect(option.rect, option.palette.highlight())
+            card_bg = QColor(Colors.ACCENT_SELECTED)
         elif option.state & QStyle.State_MouseOver:
-            painter.fillRect(option.rect, option.palette.light())
-
-        # 计算缩略图区域
-        margin = 8
-        img_rect = option.rect.adjusted(margin, margin, -margin, -margin)
-        # 底部留文字空间
-        text_height = 20
-        img_rect.setHeight(option.rect.height() - margin * 2 - text_height)
-
-        # 加载缩略图
-        pixmap = self._load_thumbnail(file_path, thumbnail_path, img_rect.size())
-        if pixmap:
-            painter.drawPixmap(img_rect, pixmap)
+            card_bg = QColor(Colors.ACCENT_HOVER_LIGHT)
         else:
-            painter.fillRect(img_rect, option.palette.mid())
-            painter.setPen(option.palette.text().color())
+            card_bg = QColor(Colors.CARD_BG)
+
+        painter.setBrush(card_bg)
+        painter.setPen(QPen(QColor(Colors.BORDER_LIGHT), 1))
+        painter.drawRoundedRect(card_rect, 8, 8)
+
+        # 图片区域(顶部圆角裁剪)
+        img_margin = 8
+        img_rect = card_rect.adjusted(img_margin, img_margin, -img_margin, -img_margin)
+        text_height = 22
+        img_rect.setHeight(max(0, card_rect.height() - img_margin * 2 - text_height))
+
+        pixmap = self._load_thumbnail(file_path, thumbnail_path, img_rect.size())
+        if pixmap and img_rect.isValid():
+            clip_path = QPainterPath()
+            clip_path.addRoundedRect(img_rect, 6, 6)
+            painter.setClipPath(clip_path)
+            painter.drawPixmap(img_rect, pixmap)
+            painter.setClipping(False)
+        elif img_rect.isValid():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(Colors.WINDOW_BG))
+            painter.drawRoundedRect(img_rect, 6, 6)
+            painter.setPen(QColor(Colors.TEXT_DISABLED))
             painter.drawText(img_rect, Qt.AlignCenter, "无预览")
 
-        # 绘制文件名
-        text_rect = option.rect.adjusted(margin, 0, -margin, -4)
-        text_rect.setTop(img_rect.bottom() + 2)
-        painter.setPen(option.palette.text().color())
+        # 文件名
+        text_rect = card_rect.adjusted(img_margin + 4, 0, -img_margin - 4, -6)
+        text_rect.setTop(img_rect.bottom() + 4)
+        painter.setPen(QColor(Colors.TEXT_PRIMARY))
+        font = painter.font()
+        font.setPixelSize(11)
+        painter.setFont(font)
         elided = painter.fontMetrics().elidedText(photo_name, Qt.ElideRight, text_rect.width())
         painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, elided)
 
+        painter.restore()
+
     def sizeHint(self, option, index: QModelIndex) -> QSize:
-        return QSize(THUMBNAIL_SIZE.width(), THUMBNAIL_SIZE.height() + 24)
+        return QSize(THUMBNAIL_SIZE.width(), THUMBNAIL_SIZE.height() + 30)
 
     def _load_thumbnail(
         self, file_path: str, thumbnail_path: str, size: QSize,
@@ -215,8 +251,11 @@ class PhotoGrid(QWidget):
 
         # UI 组件
         self._back_btn = QPushButton("← 返回地图")
+        self._back_btn.setProperty("cssClass", "ghost")
+
         self._province_label = QLabel()
-        self._province_label.setStyleSheet("font-size: 18px; font-weight: bold; padding: 8px;")
+        self._province_label.setFont(Fonts.title(16))
+        self._province_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; padding: 12px 8px;")
 
         self._model = PhotoListModel(db, self)
         self._list_view = QListView()
@@ -224,15 +263,28 @@ class PhotoGrid(QWidget):
         self._list_view.setItemDelegate(ThumbnailDelegate(self._list_view))
         self._list_view.setViewMode(QListView.IconMode)
         self._list_view.setIconSize(THUMBNAIL_SIZE)
-        self._list_view.setGridSize(QSize(THUMBNAIL_SIZE.width() + 12, THUMBNAIL_SIZE.height() + 30))
+        self._list_view.setGridSize(QSize(THUMBNAIL_SIZE.width() + 20, THUMBNAIL_SIZE.height() + 42))
         self._list_view.setResizeMode(QListView.Adjust)
         self._list_view.setWrapping(True)
         self._list_view.setBatchSize(30)
         self._list_view.setUniformItemSizes(True)
-        self._list_view.setSpacing(4)
+        self._list_view.setSpacing(8)
+        self._list_view.setStyleSheet(f"""
+            QListView {{
+                border: none;
+                background-color: {Colors.WINDOW_BG};
+            }}
+        """)
 
         self._load_more_btn = QPushButton("加载更多...")
+        self._load_more_btn.setProperty("cssClass", "primary")
         self._load_more_btn.setVisible(False)
+
+        self._empty_label = QLabel("该省份暂无照片")
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._empty_label.setFont(Fonts.title(14))
+        self._empty_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; padding: 40px;")
+        self._empty_label.setVisible(False)
 
         # 布局
         top_bar = QHBoxLayout()
@@ -242,6 +294,7 @@ class PhotoGrid(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
         layout.addWidget(self._list_view, 1)
+        layout.addWidget(self._empty_label, 1)
         layout.addWidget(self._load_more_btn)
 
         # 信号连接
@@ -275,11 +328,18 @@ class PhotoGrid(QWidget):
     def _update_display(self) -> None:
         count = self._model.rowCount()
         total = self._model.total
-        self._province_label.setText(
-            f"{self._model.province_name} (第 {min(count, total)} / {total} 张)"
-        )
+        if total == 0 and self._model.province_name:
+            self._province_label.setText(self._model.province_name)
+            self._list_view.setVisible(False)
+            self._empty_label.setVisible(True)
+        else:
+            self._empty_label.setVisible(False)
+            self._list_view.setVisible(True)
+            self._province_label.setText(
+                f"{self._model.province_name} (第 {min(count, total)} / {total} 张)"
+            )
         self._load_more_btn.setVisible(self._model.has_more())
-        QPixmapCache.clear()  # 切换省份时清理内存缓存
+        QPixmapCache.clear()
 
     def _load_more(self) -> None:
         self._load_more_btn.setEnabled(False)

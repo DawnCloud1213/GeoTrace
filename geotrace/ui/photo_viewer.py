@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from geotrace.ui.theme import Colors
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,6 +32,11 @@ class PhotoViewer(QDialog):
         self.setWindowTitle(Path(file_path).name)
         self.resize(1200, 800)
         self.setMinimumSize(400, 300)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {Colors.MAP_BG};
+            }}
+        """)
 
         # UI
         self._label = QLabel()
@@ -71,6 +78,7 @@ class PhotoViewer(QDialog):
             img_rgb = img.convert("RGB")
         except Exception as e:
             logger.error("无法加载图片 %s: %s", self._file_path, e)
+            self._label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 14px;")
             self._label.setText(f"无法加载图片:\n{self._file_path}\n\n{e}")
             return
 
