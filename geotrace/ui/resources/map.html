@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GeoTrace - 中国照片地图</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #fef9f0;
+}
+#map-container {
+    width: 100%; height: 100%;
+}
+</style>
+</head>
+<body>
+<div id="map-container"></div>
+
+<script src="qwebchannel.js"></script>
+<script src="echarts.min.js"></script>
+<script>
+var bridge = null;
+var myChart = null;
+
+// ----------------------------------------------------------
+// ECharts 初始化 (Canvas 渲染, 动画全部关闭)
+// ----------------------------------------------------------
+function initMap(geoJsonData) {
+    try {
+        console.log('initMap: registering map with ' +
+            geoJsonData.features.length + ' features');
+
+        echarts.registerMap('china', geoJsonData);
+
+        var chartDom = document.getElementById('map-container');
+        // 强制 Canvas 渲染器, 禁用所有动画提升性能
+        myChart = echarts.init(chartDom, null, {
+            renderer: 'canvas'
+        });
+
+        var option = {
+            animation: false,
+            backgroundColor: 'transparent',
+            tooltip: {
+                trigger: 'item',
+                transitionDuration: 0,
+                formatter: function(params) {
+                    if (params.value) {
+                        return '<b>' + params.name + '</b><br/>照片数: ' + params.value;
+                    }
+                    return '<b>' + params.name + '</b><br/>暂无照片';
+                }
+            },
+            visualMap: {
+                min: 0,
+                max: 100,
+                text: ['多', '少'],
+                realtime: false,
+                calculable: false,
+                inRange: {
+                    color: ['#fff3e0', '#ffcc80', '#ff9800', '#e65100']
+                }
+            },
+            series: [{
+                name: '照片分布',
+                type: 'map',
+                map: 'china',
+                roam: true,
+                scaleLimit: { min: 1, max: 4 },
+                zoom: 1.2,
+                silent: false,
+                label: { show: false },
+                emphasis: {
+                    disabled: false,
+                    scale: 1.06,
+                    label: { show: true, fontSize: 14, fontWeight: 'bold' },
+                    itemStyle: {
+                        areaColor: '#ff7043',
+                        shadowBlur: 20,
+                        shadowOffsetX: 0,
+                        shadowOffsetY: 8,
+                        shadowColor: 'rgba(139,100,60,0.45)',
+                        borderColor: '#fff',
+                        borderWidth: 1.5
+                    }
+                },
+                itemStyle: {
+                    borderColor: '#c8b898',
+                    borderWidth: 0.6,
+                    shadowBlur: 6,
+                    shadowOffsetX: 2,
+                    shadowOffsetY: 4,
+                    shadowColor: 'rgba(139,100,60,0.2)'
+                },
+                select: {
+                    label: { show: true, fontSize: 14 },
+                    itemStyle: { areaColor: '#ff7043' }
+                },
+                data: []
+            }]
+        };
+
+        myChart.setOption(option);
+        console.log('initMap: chart rendered (canvas, no animation)');
+
+        // 省份点击 -> Python
+        myChart.on('click', function(params) {
+            if (params.componentType === 'series' && params.name) {
+                if (bridge) bridge.onProvinceClicked(params.name);
+            }
+        });
+
+        // 容器尺寸变化时自动重绘 (debounce 防止全屏黑闪)
+        var resizeTimer = null;
+        function scheduleResize() {
+            if (resizeTimer) clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(function() {
+                if (myChart && !myChart.isDisposed()) {
+                    myChart.resize();
+                }
+            }, 80);
+        }
+        if (window.ResizeObserver) {
+            new ResizeObserver(scheduleResize).observe(chartDom);
+        }
+        window.addEventListener('resize', scheduleResize);
+
+    } catch (e) {
+        console.error('initMap error: ' + e.message);
+    }
+}
+
+// ----------------------------------------------------------
+// QWebChannel 初始化
+// ----------------------------------------------------------
+function initQWebChannel() {
+    try {
+        if (typeof QWebChannel === 'undefined' ||
+            typeof qt === 'undefined' || !qt.webChannelTransport) {
+            console.warn('QWebChannel not available');
+            return;
+        }
+        new QWebChannel(qt.webChannelTransport, function(channel) {
+            bridge = channel.objects.bridge;
+            console.log('QWebChannel: bridge ready');
+
+            bridge.provinceStatsChanged.connect(function(jsonStr) {
+                updateMapHeatmap(JSON.parse(jsonStr));
+            });
+
+            bridge.highlightProvince.connect(function(name) {
+                highlightProvince(name);
+            });
+
+            bridge.onMapReady();
+        });
+    } catch (e) {
+        console.error('QWebChannel init error: ' + e.message);
+    }
+}
+
+// ----------------------------------------------------------
+// 数据处理 (批量更新, 避免逐帧重绘)
+// ----------------------------------------------------------
+function updateMapHeatmap(stats) {
+    if (!myChart) return;
+    var maxVal = 1;
+    if (stats && stats.length > 0) {
+        for (var i = 0; i < stats.length; i++) {
+            maxVal = Math.max(maxVal, stats[i].value || 0);
+        }
+    }
+    myChart.setOption({
+        animation: false,
+        visualMap: { max: maxVal || 1 },
+        series: [{ data: stats || [] }]
+    }, { notMerge: false, lazyUpdate: true });
+}
+
+function highlightProvince(name) {
+    if (!myChart) return;
+    myChart.dispatchAction({ type: 'highlight', seriesIndex: 0, name: name });
+}
+
+// ----------------------------------------------------------
+// 启动
+// ----------------------------------------------------------
+initQWebChannel();
+</script>
+</body>
+</html>

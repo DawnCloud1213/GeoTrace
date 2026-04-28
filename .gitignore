@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 数据库 (运行时生成)
+data/geotrace_index.db
+
+# 缩略图缓存 (运行时生成)
+geotrace_thumbnails/
+
+# PyInstaller
+*.spec
+
+# OS
+Thumbs.db
+.DS_Store
