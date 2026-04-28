@@ -19,11 +19,12 @@ from PySide6.QtGui import (
     QPolygonF,
     QTransform,
 )
-from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 
 from geotrace.ui.bridge import MapBridge
+from geotrace.ui.theme import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ class _MapCanvas(QWidget):
     """手绘地图画布 — 处理绘制 + 所有鼠标交互."""
 
     provinceClicked = Signal(str)
+    hoveredChanged = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -474,6 +476,7 @@ class _MapCanvas(QWidget):
             self._hovered = ""
             self._hovered_neighbors = set()
             self._update_hover_boost_target()
+            self.hoveredChanged.emit("")
             self.update()
 
     # ------------------------------------------------------------------
@@ -496,6 +499,7 @@ class _MapCanvas(QWidget):
             else:
                 self._hovered_neighbors = set()
             self._update_hover_boost_target()
+            self.hoveredChanged.emit(hit)
             self.update()
 
 
@@ -509,12 +513,14 @@ class MapWidget(QWidget):
         super().__init__(parent)
         self._bridge = MapBridge()
         self._geo_json_loaded = False
+        self._stats_max_val = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._canvas = _MapCanvas(self)
         self._canvas.provinceClicked.connect(self._on_province_clicked)
+        self._canvas.hoveredChanged.connect(self._on_hovered_changed)
         layout.addWidget(self._canvas)
 
         # 浮动按钮
@@ -532,12 +538,73 @@ class MapWidget(QWidget):
         self._btn_settings.setProperty("cssClass", "mapOverlay")
         self._btn_settings.clicked.connect(self.toggleSettings.emit)
 
+        # 省份悬停提示
+        self._hover_tooltip = QLabel(self)
+        self._hover_tooltip.setStyleSheet(f"""
+            QLabel {{
+                background: rgba(255,255,255,0.90);
+                border: 1px solid {Colors.BORDER_MEDIUM};
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 12px;
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+        self._hover_tooltip.setVisible(False)
+
+        # 色阶图例
+        self._legend = self._create_legend()
+
+    def _create_legend(self) -> QFrame:
+        from geotrace.ui.theme import Fonts as F
+        legend = QFrame(self)
+        legend.setObjectName("mapLegend")
+        legend.setStyleSheet(f"""
+            QFrame#mapLegend {{
+                background: rgba(255,255,255,0.85);
+                border: 1px solid {Colors.BORDER_LIGHT};
+                border-radius: 6px;
+                padding: 8px;
+            }}
+        """)
+
+        vl = QVBoxLayout(legend)
+        vl.setContentsMargins(8, 6, 8, 6)
+        vl.setSpacing(2)
+
+        title = QLabel("照片数")
+        title.setFont(F.caption(9))
+        title.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; border: none; background: transparent;")
+        vl.addWidget(title)
+
+        self._legend_bar = QWidget()
+        self._legend_bar.setFixedSize(120, 12)
+        vl.addWidget(self._legend_bar)
+
+        labels_row = QHBoxLayout()
+        self._legend_min = QLabel("0")
+        self._legend_max = QLabel("0")
+        for lbl in (self._legend_min, self._legend_max):
+            lbl.setFont(F.caption(8))
+            lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; border: none; background: transparent;")
+        labels_row.addWidget(self._legend_min)
+        labels_row.addStretch()
+        labels_row.addWidget(self._legend_max)
+        vl.addLayout(labels_row)
+
+        legend.setVisible(False)
+        return legend
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._btn_provinces.move(8, 8)
         self._btn_settings.move(self.width() - 44, 8)
+        self._hover_tooltip.move(50, self.height() - 50)
+        self._legend.move(self.width() - 150, self.height() - 100)
         self._btn_provinces.raise_()
         self._btn_settings.raise_()
+        self._hover_tooltip.raise_()
+        self._legend.raise_()
 
     @property
     def bridge(self) -> MapBridge:
@@ -584,6 +651,16 @@ class MapWidget(QWidget):
                 max_val = val
         self._canvas.set_province_colors(values, max_val)
 
+        # 更新图例
+        total_photos = sum(values.values())
+        self._stats_max_val = max_val
+        if total_photos > 0 and max_val > 0:
+            self._legend_min.setText("0")
+            self._legend_max.setText(str(max_val))
+            self._legend.setVisible(True)
+        else:
+            self._legend.setVisible(False)
+
     def highlight(self, province_name: str) -> None:
         self._canvas.highlight(province_name)
 
@@ -593,6 +670,14 @@ class MapWidget(QWidget):
 
     def _on_province_clicked(self, name: str) -> None:
         self._bridge.provinceClicked.emit(name)
+
+    def _on_hovered_changed(self, name: str) -> None:
+        if name:
+            self._hover_tooltip.setText(name)
+            self._hover_tooltip.adjustSize()
+            self._hover_tooltip.setVisible(True)
+        else:
+            self._hover_tooltip.setVisible(False)
 
     # ------------------------------------------------------------------
     # GeoJSON 简化
