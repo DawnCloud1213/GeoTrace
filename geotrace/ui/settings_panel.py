@@ -1,7 +1,6 @@
 """右侧设置面板 — 浮动覆盖在地图上."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -15,6 +14,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from geotrace.ui.theme import Colors, Fonts
+
 
 class SettingsPanel(QFrame):
     """浮动设置面板."""
@@ -27,13 +28,6 @@ class SettingsPanel(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("floatingPanel")
-        self.setStyleSheet("""
-            #floatingPanel {
-                background: rgba(255,255,255,0.96);
-                border: 1px solid #ddd;
-                border-radius: 8px;
-            }
-        """)
         self.setMinimumWidth(180)
         self.setMaximumWidth(250)
 
@@ -44,91 +38,69 @@ class SettingsPanel(QFrame):
         # 标题栏
         header = QHBoxLayout()
         title = QLabel("设置")
-        title.setFont(QFont("", 11, QFont.Bold))
+        title.setFont(Fonts.title(11))
         header.addWidget(title)
         header.addStretch()
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(24, 24)
         close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; border: none;
-                font-size: 14px; color: #999;
-            }
-            QPushButton:hover { color: #333; }
-        """)
+        close_btn.setProperty("cssClass", "ghost")
         close_btn.clicked.connect(self.closeRequested.emit)
         header.addWidget(close_btn)
         layout.addLayout(header)
 
         # ── 照片目录 ──
         dir_label = QLabel("照片目录")
-        dir_label.setFont(QFont("", 10, QFont.Bold))
+        dir_label.setFont(Fonts.title(10))
         layout.addWidget(dir_label)
 
         self._dir_list = QListWidget()
-        self._dir_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #e8e8e8; border-radius: 4px;
-                background: #fafaf5; font-size: 12px;
-            }
-            QListWidget::item {
-                padding: 4px 8px; border-bottom: 1px solid #f0f0f0;
-            }
-            QListWidget::item:hover { background: #fff3e0; }
+        self._dir_list.setStyleSheet(f"""
+            QListWidget {{
+                border: 1px solid {Colors.BORDER_LIGHT};
+                border-radius: 4px;
+                background: {Colors.INPUT_BG};
+                font-size: 12px;
+            }}
+            QListWidget::item {{
+                padding: 4px 8px;
+                border-bottom: 1px solid {Colors.BORDER_LIGHT};
+            }}
+            QListWidget::item:hover {{
+                background: {Colors.ACCENT_HOVER_LIGHT};
+            }}
         """)
         layout.addWidget(self._dir_list)
 
-        btn_style = """
-            QPushButton {
-                border: none; border-radius: 4px;
-                padding: 5px 10px; font-size: 12px; color: white;
-            }
-        """
         add_btn = QPushButton("+ 添加目录")
-        add_btn.setStyleSheet(btn_style + """
-            QPushButton { background: #43a047; }
-            QPushButton:hover { background: #388e3c; }
-        """)
+        add_btn.setProperty("cssClass", "success")
         add_btn.clicked.connect(self._on_add_directory)
         layout.addWidget(add_btn)
 
         remove_btn = QPushButton("- 移除选中")
-        remove_btn.setStyleSheet(btn_style + """
-            QPushButton { background: #e57373; }
-            QPushButton:hover { background: #d32f2f; }
-        """)
+        remove_btn.setProperty("cssClass", "danger")
         remove_btn.clicked.connect(self._on_remove_directory)
         layout.addWidget(remove_btn)
 
         # ── 分隔 ──
         sep = QLabel()
         sep.setFixedHeight(1)
-        sep.setStyleSheet("background: #e0e0e0;")
+        sep.setStyleSheet(f"background: {Colors.BORDER_LIGHT};")
         layout.addWidget(sep)
 
         # ── 扫描 ──
         scan_label = QLabel("扫描")
-        scan_label.setFont(QFont("", 10, QFont.Bold))
+        scan_label.setFont(Fonts.title(10))
         layout.addWidget(scan_label)
 
         rescan_btn = QPushButton("重新扫描所有目录")
-        rescan_btn.setStyleSheet(btn_style + """
-            QPushButton { background: #ff9800; padding: 7px 12px; font-size: 13px; }
-            QPushButton:hover { background: #f57c00; }
-        """)
+        rescan_btn.setProperty("cssClass", "primary")
+        rescan_btn.setStyleSheet("font-size: 13px; padding: 7px 12px;")
         rescan_btn.clicked.connect(self._on_rescan)
         layout.addWidget(rescan_btn)
 
         self._progress = QProgressBar()
         self._progress.setVisible(False)
-        self._progress.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #ddd; border-radius: 3px;
-                background: #f5f5f5; height: 14px;
-            }
-            QProgressBar::chunk { background: #ff9800; border-radius: 2px; }
-        """)
         layout.addWidget(self._progress)
 
         layout.addStretch()

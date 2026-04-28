@@ -4,9 +4,11 @@ import json
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QThread, Signal, Slot
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
+    QGraphicsOpacityEffect,
     QLabel,
     QMainWindow,
     QMenuBar,
@@ -26,6 +28,7 @@ from geotrace.ui.photo_grid import PhotoGrid
 from geotrace.ui.photo_viewer import PhotoViewer
 from geotrace.ui.province_list import ProvinceListPanel
 from geotrace.ui.settings_panel import SettingsPanel
+from geotrace.ui.theme import Colors, Fonts, panel_shadow_effect
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,8 @@ class MainWindow(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._photo_count_label = QLabel("照片总数: 0")
+        self._photo_count_label.setFont(Fonts.ui(9))
+        self._photo_count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
         self._status_bar.addPermanentWidget(self._photo_count_label)
 
         # 中央: 单列全窗口
@@ -374,7 +379,7 @@ class MainWindow(QMainWindow):
             self, "关于 GeoTrace (迹点)",
             "<h3>GeoTrace (迹点) v0.1.0</h3>"
             "<p>离线照片地理聚合与检索应用</p>"
-            "<p>基于 Python + PySide6 + ECharts 构建</p>",
+            "<p>基于 Python + PySide6 构建，原生 QPainter 手绘地图</p>",
         )
 
     # ------------------------------------------------------------------

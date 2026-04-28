@@ -518,31 +518,24 @@ class MapWidget(QWidget):
         layout.addWidget(self._canvas)
 
         # 浮动按钮
-        btn_style = """
-            QPushButton {
-                background: rgba(255,255,255,0.85); border: 1px solid #ccc;
-                border-radius: 4px; font-size: 16px; color: #555;
-            }
-            QPushButton:hover { background: rgba(255,255,255,0.95); border-color: #999; }
-        """
         self._btn_provinces = QPushButton("☰", self)
-        self._btn_provinces.setFixedSize(32, 32)
+        self._btn_provinces.setFixedSize(36, 36)
         self._btn_provinces.setCursor(Qt.PointingHandCursor)
         self._btn_provinces.setToolTip("省份列表")
-        self._btn_provinces.setStyleSheet(btn_style)
+        self._btn_provinces.setProperty("cssClass", "mapOverlay")
         self._btn_provinces.clicked.connect(self.toggleProvinceList.emit)
 
         self._btn_settings = QPushButton("⚙", self)
-        self._btn_settings.setFixedSize(32, 32)
+        self._btn_settings.setFixedSize(36, 36)
         self._btn_settings.setCursor(Qt.PointingHandCursor)
         self._btn_settings.setToolTip("设置")
-        self._btn_settings.setStyleSheet(btn_style)
+        self._btn_settings.setProperty("cssClass", "mapOverlay")
         self._btn_settings.clicked.connect(self.toggleSettings.emit)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._btn_provinces.move(8, 8)
-        self._btn_settings.move(self.width() - 40, 8)
+        self._btn_settings.move(self.width() - 44, 8)
         self._btn_provinces.raise_()
         self._btn_settings.raise_()
 
