@@ -24,7 +24,7 @@ GeoTrace/
 ├── geotrace/
 │   ├── __init__.py                # v0.1.0
 │   ├── __main__.py                # python -m geotrace 入口
-│   ├── app.py                     # QApplication, 日志, 资源检查, GPU 配置
+│   ├── app.py                     # QApplication, 全局 QSS, 窗口图标
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── models.py              # PhotoMetadata, ProvinceStat dataclass
@@ -37,11 +37,12 @@ GeoTrace/
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── main_window.py         # QMainWindow, QStackedWidget 视图路由
-│   │   ├── map_widget.py          # 【主地图】原生 QPainter 手绘中国地图
+│   │   ├── map_widget.py          # 【主地图】QPainter 手绘 + 色阶图例 + 悬停提示
 │   │   ├── map_view.py            # 【已废弃】旧 QWebEngineView + ECharts 实现
 │   │   ├── bridge.py              # MapBridge: QObject Signal 集线器
-│   │   ├── photo_grid.py          # QListView + 分页 + QPixmapCache 缩略图
-│   │   ├── photo_viewer.py        # QDialog 大图查看 (EXIF 自动旋转)
+│   │   ├── theme.py               # 主题系统: Colors/Fonts/Metrics/GLOBAL_QSS/投影
+│   │   ├── photo_grid.py          # QListView 卡片式缩略图 + 分页 + 空状态
+│   │   ├── photo_viewer.py        # QDialog 大图查看 (EXIF 自动旋转 + 暖色背景)
 │   │   ├── province_list.py       # 浮动省份列表面板
 │   │   ├── settings_panel.py      # 浮动设置面板 (目录管理 + 扫描)
 │   │   └── resources/
@@ -88,7 +89,24 @@ GeoTrace/
 - **标签动画**: 缩放 ≥ 110% 时省份简称淡入显示，悬停省份 + 邻居省份不透明放大
 - **省份邻接**: 通过 Shapely `touches()` + 距离回退计算邻接关系，悬停时高亮省 + 邻居
 - **GeoJSON 简化**: 加载时 `shapely.simplify(tolerance=0.02)` 减少多边形顶点
+- **色阶图例**: 右下角半透明叠加层，4 段渐变色条 + 最小/最大值标签
+- **悬停提示**: `_MapCanvas.hoveredChanged(str)` 信号 → MapWidget 浮动 QLabel
 - **为什么不用 QWebEngineView**: QGraphicsView Item 事件分发在复杂几何场景下不可靠，QWebEngine 打包体积大 (~200MB+) 且启动慢，改用最底层手绘保证交互可靠性
+
+### 主题系统 (theme.py)
+
+- **Colors 类**: 暖土色系调色板 (Surface / Text / Border / Accent / Semantic / Map / Progress)
+- **Fonts 类**: 字体栈 `"Microsoft YaHei UI" → "Segoe UI" → "SimSun"` + `ui()`/`title()`/`caption()` 工厂
+- **Metrics 类**: 统一圆角/内边距/阴影/按钮尺寸
+- **GLOBAL_QSS**: 一次性 `app.setStyleSheet()` 应用，覆盖所有 Qt 组件 (QPushButton 含 `cssClass` 属性选择器)
+- **投影工厂**: `panel_shadow_effect()` (blur=12, offset 0,2) 和 `card_shadow_effect()` (blur=8, offset 0,1)
+- 所有 UI 文件通过 `from geotrace.ui.theme import Colors, Fonts` 引用，禁止硬编码颜色
+
+### UI 动画
+
+- **面板动画**: 省份列表面板 / 设置面板 滑入滑出 (200ms/150ms, OutCubic/InCubic, geometry 动画)
+- **视图切换**: QStackedWidget 交叉淡入淡出 (150ms, QGraphicsOpacityEffect)
+- **面板投影**: QGraphicsDropShadowEffect (与 geometry 动画不冲突)
 
 ### Bridge 模式 (bridge.py)
 
@@ -133,9 +151,9 @@ rtree>=1.0.0
 
 1. **libpng iCCP 警告** — Qt 内置 PNG 资源的色彩配置文件问题，无害，可忽略
 2. **GeoJSON 编码** — DataV 中文省份名在终端可能显示乱码，实际数据正确
-3. **GPU 配置** — `app.py` 中 `QTWEBENGINE_CHROMIUM_FLAGS` 环境变量对当前原生渲染无效，可考虑清理
-4. **已废弃文件** — `map_view.py`, `echarts.min.js`, `map.html`, `qwebchannel.js` 不再被主代码引用，保留供参考
-5. **缩略图缓存** — 缩略图生成到系统临时目录 (`tempfile.gettempdir()/geotrace_thumbnails/`)
+3. **已废弃文件** — `map_view.py`, `echarts.min.js`, `map.html`, `qwebchannel.js` 不再被主代码引用，保留供参考
+4. **缩略图缓存** — 缩略图生成到系统临时目录 (`tempfile.gettempdir()/geotrace_thumbnails/`)
+5. **GitHub CLI** — 通过 winget 安装 `C:\Program Files\GitHub CLI\gh.exe`，需 VPN/代理才能认证和推送
 
 ## 封装方案A: PyInstaller exe 打包 (待实施)
 
