@@ -58,6 +58,11 @@ class MainWindow(QMainWindow):
         self.resize(1500, 900)
         self.setMinimumSize(1100, 600)
 
+        # 程序化窗口图标
+        icon_pixmap = QPixmap(64, 64)
+        icon_pixmap.fill(QColor(Colors.ACCENT_PRIMARY))
+        self.setWindowIcon(QIcon(icon_pixmap))
+
         # 确保数据目录存在
         _DEFAULT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -217,23 +222,61 @@ class MainWindow(QMainWindow):
 
     def _toggle_province_list(self) -> None:
         if self._province_list.isVisible():
-            self._province_list.hide()
+            self._animate_slide_out(self._province_list, to_left=True)
         else:
             self._settings_panel.hide()
+            self._show_panel_with_shadow(self._province_list)
             cw, ch = self._central.width(), self._central.height()
             self._province_list.setGeometry(8, 40, 200, ch - 60)
-            self._province_list.show()
-            self._province_list.raise_()
+            self._animate_slide_in(self._province_list, from_left=True)
 
     def _toggle_settings(self) -> None:
         if self._settings_panel.isVisible():
-            self._settings_panel.hide()
+            self._animate_slide_out(self._settings_panel, to_left=False)
         else:
             self._province_list.hide()
+            self._show_panel_with_shadow(self._settings_panel)
             cw, ch = self._central.width(), self._central.height()
             self._settings_panel.setGeometry(cw - 208, 40, 200, ch - 60)
-            self._settings_panel.show()
-            self._settings_panel.raise_()
+            self._animate_slide_in(self._settings_panel, from_left=False)
+
+    def _show_panel_with_shadow(self, panel) -> None:
+        if panel.graphicsEffect() is None:
+            panel.setGraphicsEffect(panel_shadow_effect())
+
+    def _animate_slide_in(self, panel, from_left: bool = True) -> None:
+        target_geo = panel.geometry()
+        if from_left:
+            start_geo = target_geo.translated(-target_geo.width(), 0)
+        else:
+            start_geo = target_geo.translated(target_geo.width(), 0)
+        panel.setGeometry(start_geo)
+        panel.show()
+        panel.raise_()
+
+        anim = QPropertyAnimation(panel, b"geometry")
+        anim.setDuration(200)
+        anim.setStartValue(start_geo)
+        anim.setEndValue(target_geo)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.start()
+        panel._slide_anim = anim
+
+    def _animate_slide_out(self, panel, to_left: bool = True) -> None:
+        current_geo = panel.geometry()
+        if to_left:
+            end_geo = current_geo.translated(-current_geo.width(), 0)
+        else:
+            end_geo = current_geo.translated(current_geo.width(), 0)
+
+        anim = QPropertyAnimation(panel, b"geometry")
+        anim.setDuration(150)
+        anim.setStartValue(current_geo)
+        anim.setEndValue(end_geo)
+        anim.setEasingCurve(QEasingCurve.InCubic)
+        anim.finished.connect(panel.hide)
+        anim.start()
+        panel._slide_anim = anim
 
     # ------------------------------------------------------------------
     # 视图切换
@@ -242,7 +285,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def show_map(self) -> None:
         """切换到地图视图."""
-        self._stack.setCurrentIndex(0)
+        self._animate_view_switch(0)
         self._refresh_stats()
 
     @Slot(str)
@@ -252,13 +295,41 @@ class MainWindow(QMainWindow):
             return
         logger.info("切换到省份: %s", province_name)
         self._photo_grid.load_province(province_name)
-        self._stack.setCurrentIndex(1)
+        self._animate_view_switch(1)
 
     @Slot()
     def _on_unclassified_clicked(self) -> None:
         """显示未分类照片."""
         self._photo_grid.load_province("Unclassified")
-        self._stack.setCurrentIndex(1)
+        self._animate_view_switch(1)
+
+    def _animate_view_switch(self, target_index: int) -> None:
+        if self._stack.currentIndex() == target_index:
+            return
+
+        effect = QGraphicsOpacityEffect(self._stack)
+        self._stack.setGraphicsEffect(effect)
+
+        anim = QPropertyAnimation(effect, b"opacity")
+        anim.setDuration(150)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.InCubic)
+
+        def on_faded_out():
+            self._stack.setCurrentIndex(target_index)
+            anim2 = QPropertyAnimation(effect, b"opacity")
+            anim2.setDuration(150)
+            anim2.setStartValue(0.0)
+            anim2.setEndValue(1.0)
+            anim2.setEasingCurve(QEasingCurve.OutCubic)
+            anim2.finished.connect(lambda: self._stack.setGraphicsEffect(None))
+            anim2.start()
+            self._view_fade_anim2 = anim2
+
+        anim.finished.connect(on_faded_out)
+        anim.start()
+        self._view_fade_anim = anim
 
     @Slot(str)
     def _on_photo_double_clicked(self, file_path: str) -> None:
