@@ -579,6 +579,14 @@ class MapWidget(QWidget):
 
         self._legend_bar = QWidget()
         self._legend_bar.setFixedSize(120, 12)
+        self._legend_bar.setStyleSheet(f"""
+            background: qlineargradient(x1:0, x2:1,
+                stop:0 {Colors.MAP_HEAT_1},
+                stop:0.33 {Colors.MAP_HEAT_2},
+                stop:0.66 {Colors.MAP_HEAT_3},
+                stop:1 {Colors.MAP_HEAT_4});
+            border-radius: 2px;
+        """)
         vl.addWidget(self._legend_bar)
 
         labels_row = QHBoxLayout()
