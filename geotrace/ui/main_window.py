@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         self._splitter = QSplitter(Qt.Horizontal)
         self._splitter.addWidget(self._sidebar)
         self._splitter.addWidget(self._map_view)
-        self._splitter.setSizes([320, 1280])
+        self._splitter.setSizes([340, 1260])
         self._splitter.setStretchFactor(1, 1)
         self.setCentralWidget(self._splitter)
 

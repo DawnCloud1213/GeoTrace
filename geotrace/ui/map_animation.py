@@ -24,10 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 class MapViewAnimator(QVariantAnimation):
-    """对地图中心点 (pixel) 和 zoom 进行双属性同步插值.
+    """对地图中心点 (pixel) 和 zoom 进行平滑插值.
 
-    通过 QPropertyAnimation 组实现并行动画，
-    或更简单地直接绑定 valueChanged 到一个包含两个属性的 dict.
+    使用单一 float progress (0.0 → 1.0) 驱动，
+    在 valueChanged 中手动 lerp 计算 center / zoom，
+    以规避 PySide6 QVariantAnimation 不支持 Python tuple 插值的问题.
     """
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -37,7 +38,12 @@ class MapViewAnimator(QVariantAnimation):
         self.valueChanged.connect(self._on_value_changed)
 
         self._callback: Callable[[float, float, float], None] | None = None
+
+        self._start_px: float = 0.0
+        self._start_py: float = 0.0
         self._start_zoom: float = 4.0
+        self._end_px: float = 0.0
+        self._end_py: float = 0.0
         self._end_zoom: float = 4.0
 
     def set_callback(
@@ -56,30 +62,24 @@ class MapViewAnimator(QVariantAnimation):
         target_center_py: float,
         target_zoom: float,
     ) -> None:
-        """启动飞行动画.
-
-        Args:
-            start_*: 当前状态.
-            target_*: 目标状态.
-        """
+        """启动飞行动画."""
         self.stop()
+        self._start_px = start_center_px
+        self._start_py = start_center_py
         self._start_zoom = max(MIN_ZOOM, start_zoom)
+        self._end_px = target_center_px
+        self._end_py = target_center_py
         self._end_zoom = max(MIN_ZOOM, min(MAX_ZOOM, target_zoom))
 
-        # 使用 QVariantAnimation 对复杂值进行插值
-        # 将起始和目标打包为 tuple，在 interpolatedValue 中解析
-        self.setStartValue(
-            (start_center_px, start_center_py, self._start_zoom),
-        )
-        self.setEndValue(
-            (target_center_px, target_center_py, self._end_zoom),
-        )
+        self.setStartValue(0.0)
+        self.setEndValue(1.0)
         self.start()
 
     def _on_value_changed(self, value) -> None:
-        if not isinstance(value, tuple) or len(value) != 3:
-            return
-        px, py, zoom = value
+        progress = float(value)
+        px = self._start_px + (self._end_px - self._start_px) * progress
+        py = self._start_py + (self._end_py - self._start_py) * progress
+        zoom = self._start_zoom + (self._end_zoom - self._start_zoom) * progress
         if self._callback:
             self._callback(px, py, zoom)
 

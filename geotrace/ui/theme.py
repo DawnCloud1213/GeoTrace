@@ -352,6 +352,29 @@ QFrame#floatingPanel {{
     border: 1px solid {Colors.BORDER_LIGHT};
     border-radius: {Metrics.BORDER_RADIUS_MD}px;
 }}
+
+/* ── QTabWidget / QTabBar ─────────────────────────────────────── */
+QTabWidget::pane {{
+    border: none;
+    background-color: {Colors.WINDOW_BG};
+}}
+QTabBar::tab {{
+    background: {Colors.CARD_BG};
+    border: 1px solid {Colors.BORDER_LIGHT};
+    border-bottom: none;
+    border-top-left-radius: {Metrics.BORDER_RADIUS_SM}px;
+    border-top-right-radius: {Metrics.BORDER_RADIUS_SM}px;
+    padding: 6px 16px;
+    color: {Colors.TEXT_SECONDARY};
+}}
+QTabBar::tab:selected {{
+    background: {Colors.WINDOW_BG};
+    color: {Colors.TEXT_PRIMARY};
+    font-weight: bold;
+}}
+QTabBar::tab:!selected {{
+    margin-top: 2px;
+}}
 """
 
 

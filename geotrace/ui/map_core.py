@@ -130,28 +130,67 @@ class TileManager(QObject):
 
     def __init__(
         self,
-        mbtiles_path: str | Path | None = None,
+        providers: dict[str, str | Path] | None = None,
+        default_provider: str = "standard",
         placeholder_color: QColor | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._placeholder = placeholder_color or QColor("#FEF9F0")
-        self._mbtiles = MBTilesProvider(mbtiles_path) if mbtiles_path else MBTilesProvider("")
+        self._providers: dict[str, MBTilesProvider] = {}
+        if providers:
+            for key, path in providers.items():
+                provider = MBTilesProvider(path)
+                if provider.available:
+                    self._providers[key] = provider
+        self._active_key = default_provider
+        if self._active_key not in self._providers and self._providers:
+            self._active_key = next(iter(self._providers))
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tile")
         self._pending: set[tuple[int, int, int]] = set()
-        # QPixmapCache key 格式: "geotrace_tile_z_x_y"
         self._cache_prefix = "geotrace_tile"
 
     @property
     def mbtiles_available(self) -> bool:
-        return self._mbtiles.available
+        return bool(self._providers)
+
+    @property
+    def can_switch(self) -> bool:
+        return len(self._providers) > 1
+
+    @property
+    def active_key(self) -> str:
+        return self._active_key
+
+    def set_active_provider(self, key: str) -> bool:
+        if key in self._providers:
+            if key != self._active_key:
+                self._active_key = key
+                self._pending.clear()
+            return True
+        return False
+
+    def cycle_provider(self) -> str:
+        if not self.can_switch:
+            return self._active_key
+        keys = list(self._providers.keys())
+        idx = keys.index(self._active_key)
+        next_key = keys[(idx + 1) % len(keys)]
+        self.set_active_provider(next_key)
+        return next_key
+
+    def _active_mbtiles(self) -> MBTilesProvider | None:
+        return self._providers.get(self._active_key)
 
     def _cache_key(self, x: int, y: int, z: int) -> str:
-        return f"{self._cache_prefix}_{z}_{x}_{y}"
+        return f"{self._cache_prefix}_{self._active_key}_{z}_{x}_{y}"
 
     def _load_tile_sync(self, x: int, y: int, z: int) -> QPixmap | None:
         """同步瓦片加载 (在 worker 线程中调用)."""
-        data = self._mbtiles.get_tile(x, y, z)
+        provider = self._active_mbtiles()
+        if provider is None:
+            return None
+        data = provider.get_tile(x, y, z)
         if not data:
             return None
         pixmap = QPixmap()
@@ -179,7 +218,7 @@ class TileManager(QObject):
             return
         if (x, y, z) in self._pending:
             return
-        if not self._mbtiles.available:
+        if not self._active_mbtiles():
             return
         self._pending.add((x, y, z))
         future = self._executor.submit(self._load_tile_sync, x, y, z)
@@ -248,11 +287,12 @@ class TileManager(QObject):
 
         painter.restore()
 
-        # 若一张瓦片都没有 (MBTiles 不可用), 整个视口填充背景色
-        if not has_any_tile and not self._mbtiles.available:
+        # 若当前 provider 不可用且无任何瓦片, 整个视口填充背景色
+        if not has_any_tile and self._active_mbtiles() is None:
             painter.fillRect(viewport_rect, QBrush(self._placeholder))
 
     def shutdown(self) -> None:
         """清理资源."""
         self._executor.shutdown(wait=False)
-        self._mbtiles.close()
+        for provider in self._providers.values():
+            provider.close()

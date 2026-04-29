@@ -648,11 +648,18 @@ class MapWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # TileManager (可选 MBTiles)
+        # TileManager (支持多套 MBTiles: standard + satellite)
         data_dir = Path(__file__).parent.parent.parent / "data"
-        mbtiles_path = data_dir / "tiles.mbtiles"
+        providers: dict[str, str] = {}
+        std_path = data_dir / "tiles.mbtiles"
+        sat_path = data_dir / "satellite.mbtiles"
+        if std_path.exists():
+            providers["standard"] = str(std_path)
+        if sat_path.exists():
+            providers["satellite"] = str(sat_path)
         self._tile_manager = TileManager(
-            mbtiles_path if mbtiles_path.exists() else None,
+            providers=providers if providers else None,
+            default_provider="standard",
             placeholder_color=_BG_COLOR,
             parent=self,
         )
@@ -679,15 +686,18 @@ class MapWidget(QWidget):
         self._btn_settings.setProperty("cssClass", "mapOverlay")
         self._btn_settings.clicked.connect(self.toggleSettings.emit)
 
-        # 地图样式切换 (仅 MBTiles 可用时显示)
+        # 地图样式切换 (有多套 MBTiles 时才显示)
         self._btn_style = QPushButton("🗺", self)
         self._btn_style.setFixedSize(36, 36)
         self._btn_style.setCursor(Qt.PointingHandCursor)
-        self._btn_style.setToolTip("切换底图")
         self._btn_style.setProperty("cssClass", "mapOverlay")
-        self._btn_style.setVisible(self._tile_manager.mbtiles_available)
+        if self._tile_manager.can_switch:
+            self._btn_style.setToolTip("切换底图 (当前: 标准地图)")
+            self._btn_style.setVisible(True)
+        else:
+            self._btn_style.setToolTip("切换底图 (无可用底图数据)")
+            self._btn_style.setVisible(False)
         self._btn_style.clicked.connect(self._toggle_tile_style)
-        self._tile_style = "tiles"  # "tiles" | "solid"
 
         # 返回全国视图按钮 (仅在省份视图显示)
         self._btn_back = QPushButton("←", self)
@@ -867,14 +877,16 @@ class MapWidget(QWidget):
             self._hover_tooltip.setVisible(False)
 
     def _toggle_tile_style(self) -> None:
-        """切换底图显示模式 (仅影响 TileManager 占位色, 实际瓦片由 MBTiles 内容决定)."""
-        # 当前简化实现: 切换占位色以模拟不同风格
-        if self._tile_style == "tiles":
-            self._tile_style = "solid"
-            self._tile_manager._placeholder = _BG_COLOR
+        """在标准地图与卫星影像 MBTiles 之间切换."""
+        if not self._tile_manager.can_switch:
+            return
+        next_key = self._tile_manager.cycle_provider()
+        if next_key == "satellite":
+            self._tile_manager._placeholder = QColor("#1A1A1A")
+            self._btn_style.setToolTip("切换底图 (当前: 卫星影像)")
         else:
-            self._tile_style = "tiles"
-            self._tile_manager._placeholder = QColor("#E8E0D0")
+            self._tile_manager._placeholder = _BG_COLOR
+            self._btn_style.setToolTip("切换底图 (当前: 标准地图)")
         self.update()
 
     # ------------------------------------------------------------------

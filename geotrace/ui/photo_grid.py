@@ -47,9 +47,9 @@ from geotrace.ui.photo_viewer import PhotoViewer
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 200
-# 侧边栏模式下使用紧凑缩略图
-THUMBNAIL_SIZE = QSize(140, 105)
-GRID_SPACING = QSize(THUMBNAIL_SIZE.width() + 12, THUMBNAIL_SIZE.height() + 32)
+# 侧边栏模式下使用紧凑缩略图 (128×96 确保 320px 宽 sidebar 能容下两列)
+THUMBNAIL_SIZE = QSize(128, 96)
+GRID_SPACING = QSize(THUMBNAIL_SIZE.width() + 12, THUMBNAIL_SIZE.height() + 34)
 
 
 class PhotoListModel(QAbstractListModel):
@@ -336,9 +336,14 @@ class PhotoGrid(QWidget):
         top_bar.addWidget(self._province_label, 1)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
         layout.addLayout(top_bar)
         layout.addWidget(self._list_view, 1)
         layout.addWidget(self._empty_label, 1)
+
+        # 消除父级深色背景透出
+        self.setStyleSheet(f"background-color: {Colors.WINDOW_BG};")
 
         # 信号连接
         self._back_btn.clicked.connect(self.returnToMap.emit)
