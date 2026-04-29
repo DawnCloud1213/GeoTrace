@@ -213,8 +213,59 @@ class DatabaseManager:
         conn.execute(f"DELETE FROM {TABLE_PHOTOS} WHERE id = ?", (photo_id,))
         conn.commit()
 
+    def get_photo_coords(
+        self,
+        province_name: str | None = None,
+    ) -> list[dict]:
+        """获取照片坐标列表 (轻量查询，用于地图聚类).
+
+        Args:
+            province_name: 省份名称，None 表示全部.
+
+        Returns:
+            包含 id, latitude, longitude, thumbnail_path, file_path 的 dict 列表.
+        """
+        conn = self.get_connection()
+        if province_name == "Unclassified":
+            rows = conn.execute(
+                f"""SELECT id, latitude, longitude, thumbnail_path, file_path
+                    FROM {TABLE_PHOTOS}
+                    WHERE province_name IS NULL OR province_name = 'Unclassified'
+                    ORDER BY date_taken DESC""",
+            ).fetchall()
+        elif province_name:
+            rows = conn.execute(
+                f"""SELECT id, latitude, longitude, thumbnail_path, file_path
+                    FROM {TABLE_PHOTOS}
+                    WHERE province_name = ?
+                    ORDER BY date_taken DESC""",
+                (province_name,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""SELECT id, latitude, longitude, thumbnail_path, file_path
+                    FROM {TABLE_PHOTOS}
+                    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+                    ORDER BY date_taken DESC""",
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_photos_by_ids(self, ids: list[int]) -> list[dict]:
+        """通过 ID 列表查询照片 (用于聚类点击后加载)."""
+        if not ids:
+            return []
+        conn = self.get_connection()
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"""SELECT id, file_path, file_name, thumbnail_path, date_taken,
+                       width, height, latitude, longitude
+                FROM {TABLE_PHOTOS}
+                WHERE id IN ({placeholders})
+                ORDER BY date_taken DESC""",
+            tuple(ids),
+        ).fetchall()
+        return [dict(r) for r in rows]
     def get_total_photo_count(self) -> int:
-        """获取照片总数."""
         conn = self.get_connection()
         row = conn.execute(f"SELECT COUNT(*) as cnt FROM {TABLE_PHOTOS}").fetchone()
         return row["cnt"]

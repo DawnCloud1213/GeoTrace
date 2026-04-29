@@ -47,7 +47,9 @@ from geotrace.ui.photo_viewer import PhotoViewer
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 200
-THUMBNAIL_SIZE = QSize(280, 210)
+# 侧边栏模式下使用紧凑缩略图
+THUMBNAIL_SIZE = QSize(140, 105)
+GRID_SPACING = QSize(THUMBNAIL_SIZE.width() + 12, THUMBNAIL_SIZE.height() + 32)
 
 
 class PhotoListModel(QAbstractListModel):
@@ -150,6 +152,25 @@ class PhotoQueryWorker(QObject):
             else:
                 photos, total = [], 0
             self.finished.emit(photos, total)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class PhotoIdsQueryWorker(QObject):
+    """后台线程通过 ID 列表查询照片."""
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, db: DatabaseManager, ids: list[int], parent=None) -> None:
+        super().__init__(parent)
+        self._db = db
+        self._ids = ids
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            photos = self._db.get_photos_by_ids(self._ids)
+            self.finished.emit(photos)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -287,7 +308,7 @@ class PhotoGrid(QWidget):
         self._list_view.setItemDelegate(ThumbnailDelegate(self._list_view))
         self._list_view.setViewMode(QListView.IconMode)
         self._list_view.setIconSize(THUMBNAIL_SIZE)
-        self._list_view.setGridSize(QSize(THUMBNAIL_SIZE.width() + 20, THUMBNAIL_SIZE.height() + 42))
+        self._list_view.setGridSize(GRID_SPACING)
         self._list_view.setResizeMode(QListView.Adjust)
         self._list_view.setWrapping(True)
         self._list_view.setBatchSize(30)
@@ -350,6 +371,32 @@ class PhotoGrid(QWidget):
         self._model._province_name = ""
         self._model.set_page_data([], 0)
         self._province_label.setText("")
+
+    def load_photo_ids(self, ids: list[int], title: str = "选中照片") -> None:
+        """通过 ID 列表加载照片 (聚类点击等场景)."""
+        QPixmapCache.clear()
+        self._model.set_page_data([], 0)
+        self._model._province_name = title
+        self._province_label.setText(f"{title} (加载中...)")
+        self._empty_label.setVisible(False)
+        self._is_loading = True
+        self._query_thread = QThread()
+        self._query_worker = PhotoIdsQueryWorker(self._db, ids)
+        self._query_worker.moveToThread(self._query_thread)
+        self._query_thread.started.connect(self._query_worker.run)
+        self._query_worker.finished.connect(
+            lambda photos: self._on_ids_query_finished(photos),
+        )
+        self._query_worker.finished.connect(self._query_thread.quit)
+        self._query_worker.finished.connect(self._query_worker.deleteLater)
+        self._query_thread.finished.connect(self._query_thread.deleteLater)
+        self._query_thread.start()
+
+    def _on_ids_query_finished(self, photos: list[dict]) -> None:
+        total = len(photos)
+        self._model.set_page_data(photos, total, append=False)
+        self._update_display()
+        self._is_loading = False
 
     # ------------------------------------------------------------------
     # 内部逻辑

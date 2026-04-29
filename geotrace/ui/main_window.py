@@ -1,22 +1,32 @@
-"""GeoTrace 主窗口 — QStackedWidget 视图路由与全局信号连接."""
+"""GeoTrace V2.0 主窗口 — QSplitter 左右分栏 + 常驻地图 + 浮动设置面板.
 
-import json
+布局:
+  - QSplitter(Qt.Horizontal)
+    - 左侧 Sidebar: QTabWidget (Tab0=省份列表, Tab1=照片瀑布流)
+    - 右侧主体: MapWidget (全屏地图, 始终可见)
+  - 浮动: SettingsPanel (叠加在地图右上角)
+
+视图路由变化:
+  - 废弃 QStackedWidget 淡入淡出切换.
+  - provinceClicked → 地图平滑飞行 + 左侧切到照片 Tab + 加载瀑布流.
+  - clusterClicked → 左侧切到照片 Tab + 按 ID 加载.
+  - returnToMap 信号废弃 (地图常驻).
+"""
+
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QPoint, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
-    QGraphicsOpacityEffect,
     QLabel,
     QMainWindow,
-    QMenuBar,
     QMessageBox,
-    QProgressBar,
     QPushButton,
-    QStackedWidget,
+    QSplitter,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -32,19 +42,13 @@ from geotrace.ui.theme import Colors, Fonts, panel_shadow_effect
 
 logger = logging.getLogger(__name__)
 
-# 默认数据目录 (项目根下的 data/)
 _DEFAULT_DATA_DIR = Path(__file__).parent.parent.parent / "data"
 _DEFAULT_GEOJSON = _DEFAULT_DATA_DIR / "china_provinces.geojson"
 _DEFAULT_DB = _DEFAULT_DATA_DIR / "geotrace_index.db"
 
 
 class MainWindow(QMainWindow):
-    """GeoTrace 主窗口.
-
-    QStackedWidget 管理两个视图:
-        index 0: MapView — ECharts 中国地图 + 省份列表
-        index 1: PhotoGrid — 省份照片缩略图网格
-    """
+    """GeoTrace V2.0 主窗口 — QSplitter 左右分栏."""
 
     _REQUEST_MAP_REFRESH = Signal()
 
@@ -54,9 +58,9 @@ class MainWindow(QMainWindow):
         geojson_path: str | Path | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("GeoTrace (迹点) — 照片地理聚合")
-        self.resize(1500, 900)
-        self.setMinimumSize(1100, 600)
+        self.setWindowTitle("GeoTrace (迹点) V2.0 — 照片地理聚合")
+        self.resize(1600, 900)
+        self.setMinimumSize(1200, 600)
 
         # 程序化窗口图标
         icon_pixmap = QPixmap(64, 64)
@@ -69,18 +73,38 @@ class MainWindow(QMainWindow):
         self._db_path = str(db_path or _DEFAULT_DB)
         self._geojson_path = str(geojson_path or _DEFAULT_GEOJSON)
 
-        # 初始化后端服务
+        # 后端服务
         self._db = DatabaseManager(self._db_path)
         self._spatial_index: SpatialIndex | None = None
         self._init_spatial_index()
 
-        # 初始化 UI
-        self._stack = QStackedWidget()
+        # ── 右侧: 地图 (始终可见) ──
         self._map_view = MapWidget()
-        self._photo_grid = PhotoGrid(self._db)
 
-        self._stack.addWidget(self._map_view)     # index 0
-        self._stack.addWidget(self._photo_grid)   # index 1
+        # ── 左侧 Sidebar ──
+        self._sidebar = QTabWidget()
+        self._sidebar.setMinimumWidth(280)
+        self._sidebar.setMaximumWidth(420)
+
+        # Tab 0: 省份概览列表
+        self._province_list = ProvinceListPanel()
+        # 隐藏浮动面板的关闭按钮 (在 Tab 中不需要)
+        for child in self._province_list.findChildren(QPushButton):
+            if child.text() == "✕":
+                child.setVisible(False)
+        self._sidebar.addTab(self._province_list, "省份")
+
+        # Tab 1: 地理瀑布流
+        self._photo_grid = PhotoGrid(self._db)
+        self._sidebar.addTab(self._photo_grid, "照片")
+
+        # ── QSplitter 分栏 ──
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.addWidget(self._sidebar)
+        self._splitter.addWidget(self._map_view)
+        self._splitter.setSizes([320, 1280])
+        self._splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(self._splitter)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -90,29 +114,24 @@ class MainWindow(QMainWindow):
         self._photo_count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
         self._status_bar.addPermanentWidget(self._photo_count_label)
 
-        # 中央: 单列全窗口
-        self._central = QWidget()
-        layout = QVBoxLayout(self._central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._stack)
-        self.setCentralWidget(self._central)
-
-        # 浮动面板 (叠加在中央 widget 上)
-        self._province_list = ProvinceListPanel(self._central)
-        self._settings_panel = SettingsPanel(self._central)
+        # 浮动设置面板 (parent=地图, 叠加在地图右上角)
+        self._settings_panel = SettingsPanel(self._map_view)
         self._init_settings_panel()
 
-        # 菜单栏 (精简)
+        # 菜单栏
         self._setup_menus()
 
-        # 连接信号
+        # 信号连接
         self._connect_signals()
 
-        # 初始化地图 (如果 GeoJSON 存在)
+        # 初始化地图
         self._init_map()
 
         # 刷新状态
         self._refresh_stats()
+
+        # 加载所有照片坐标供地图聚类
+        self._load_all_photo_coords()
 
     # ------------------------------------------------------------------
     # 初始化
@@ -144,43 +163,35 @@ class MainWindow(QMainWindow):
 
         # 文件菜单
         file_menu = menu_bar.addMenu("文件(&F)")
-
         import_action = file_menu.addAction("导入照片目录(&I)...")
         import_action.setShortcut("Ctrl+I")
         import_action.triggered.connect(self._on_import_directory)
-
         file_menu.addSeparator()
-
         exit_action = file_menu.addAction("退出(&X)")
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
 
         # 工具菜单
         tools_menu = menu_bar.addMenu("工具(&T)")
-
         scan_action = tools_menu.addAction("重新扫描所有目录(&R)")
         scan_action.setShortcut("Ctrl+R")
         scan_action.triggered.connect(self._on_rescan_all)
-
         gen_thumbnails_action = tools_menu.addAction("生成缺失缩略图(&T)")
         gen_thumbnails_action.triggered.connect(self._on_generate_thumbnails)
 
         # 视图菜单
         view_menu = menu_bar.addMenu("视图(&V)")
-
-        map_action = view_menu.addAction("地图视图(&M)")
+        toggle_sidebar_action = view_menu.addAction("切换侧边栏(&B)")
+        toggle_sidebar_action.setShortcut("Ctrl+B")
+        toggle_sidebar_action.triggered.connect(self._toggle_sidebar)
+        map_action = view_menu.addAction("聚焦地图(&M)")
         map_action.setShortcut("Ctrl+M")
-        map_action.triggered.connect(self.show_map)
+        map_action.triggered.connect(self._focus_map)
 
         # 帮助菜单
         help_menu = menu_bar.addMenu("帮助(&H)")
-
         about_action = help_menu.addAction("关于(&A)")
         about_action.triggered.connect(self._on_about)
-
-    # ------------------------------------------------------------------
-    # 设置面板初始化
-    # ------------------------------------------------------------------
 
     def _init_settings_panel(self) -> None:
         dirs = [d["path"] for d in self._db.get_directories()]
@@ -196,16 +207,14 @@ class MainWindow(QMainWindow):
 
         bridge.mapReady.connect(self._on_map_ready)
         bridge.provinceClicked.connect(self._on_province_clicked)
-        bridge.returnToMap.connect(self.show_map)
         bridge.unclassifiedClicked.connect(self._on_unclassified_clicked)
 
-        self._photo_grid.returnToMap.connect(self.show_map)
+        # 照片网格双击打开大图
         self._photo_grid.photoDoubleClicked.connect(self._on_photo_double_clicked)
 
-        # 浮动面板 toggle
-        self._map_view.toggleProvinceList.connect(self._toggle_province_list)
+        # 地图浮动按钮
+        self._map_view.toggleProvinceList.connect(self._toggle_sidebar)
         self._map_view.toggleSettings.connect(self._toggle_settings)
-        self._province_list.closeRequested.connect(self._province_list.hide)
         self._settings_panel.closeRequested.connect(self._settings_panel.hide)
 
         # 省份列表点击
@@ -216,35 +225,59 @@ class MainWindow(QMainWindow):
         self._settings_panel.removeDirectory.connect(self._on_remove_directory)
         self._settings_panel.rescanRequested.connect(self._on_rescan_all)
 
+        # 聚类点击
+        self._map_view.clusterClicked.connect(self._on_cluster_clicked)
+
+        # Sidebar 宽度变化时更新设置面板位置
+        self._splitter.splitterMoved.connect(self._on_splitter_moved)
+
     # ------------------------------------------------------------------
-    # 浮动面板
+    # Sidebar 控制
     # ------------------------------------------------------------------
 
-    def _toggle_province_list(self) -> None:
-        if self._province_list.isVisible():
-            self._animate_slide_out(self._province_list, to_left=True)
+    def _toggle_sidebar(self) -> None:
+        """折叠/展开左侧 sidebar."""
+        sizes = self._splitter.sizes()
+        if sizes[0] > 0:
+            self._sidebar_last_width = max(sizes[0], 280)
+            self._splitter.setSizes([0, sum(sizes)])
         else:
+            w = getattr(self, '_sidebar_last_width', 320)
+            total = sum(sizes)
+            self._splitter.setSizes([w, max(total - w, 400)])
+
+    def _focus_map(self) -> None:
+        """收起 sidebar 聚焦地图."""
+        sizes = self._splitter.sizes()
+        if sizes[0] > 0:
+            self._sidebar_last_width = sizes[0]
+            self._splitter.setSizes([0, sum(sizes)])
+
+    def _on_splitter_moved(self) -> None:
+        """Sidebar 移动时隐藏设置面板避免位置错乱."""
+        if self._settings_panel.isVisible():
             self._settings_panel.hide()
-            self._show_panel_with_shadow(self._province_list)
-            cw, ch = self._central.width(), self._central.height()
-            self._province_list.setGeometry(8, 40, 200, ch - 60)
-            self._animate_slide_in(self._province_list, from_left=True)
+
+    # ------------------------------------------------------------------
+    # 浮动面板 (仅设置面板保留)
+    # ------------------------------------------------------------------
 
     def _toggle_settings(self) -> None:
         if self._settings_panel.isVisible():
             self._animate_slide_out(self._settings_panel, to_left=False)
         else:
-            self._province_list.hide()
             self._show_panel_with_shadow(self._settings_panel)
-            cw, ch = self._central.width(), self._central.height()
-            self._settings_panel.setGeometry(cw - 208, 40, 200, ch - 60)
+            # 定位在地图内部右上角
+            mw = self._map_view.width()
+            mh = self._map_view.height()
+            self._settings_panel.setGeometry(mw - 258, 40, 250, max(mh - 60, 200))
             self._animate_slide_in(self._settings_panel, from_left=False)
 
-    def _show_panel_with_shadow(self, panel) -> None:
+    def _show_panel_with_shadow(self, panel: QWidget) -> None:
         if panel.graphicsEffect() is None:
             panel.setGraphicsEffect(panel_shadow_effect())
 
-    def _animate_slide_in(self, panel, from_left: bool = True) -> None:
+    def _animate_slide_in(self, panel: QWidget, from_left: bool = True) -> None:
         target_geo = panel.geometry()
         if from_left:
             start_geo = target_geo.translated(-target_geo.width(), 0)
@@ -260,9 +293,9 @@ class MainWindow(QMainWindow):
         anim.setEndValue(target_geo)
         anim.setEasingCurve(QEasingCurve.OutBack)
         anim.start()
-        panel._slide_anim = anim
+        panel._slide_anim = anim  # type: ignore[attr-defined]
 
-    def _animate_slide_out(self, panel, to_left: bool = True) -> None:
+    def _animate_slide_out(self, panel: QWidget, to_left: bool = True) -> None:
         current_geo = panel.geometry()
         if to_left:
             end_geo = current_geo.translated(-current_geo.width(), 0)
@@ -276,62 +309,49 @@ class MainWindow(QMainWindow):
         anim.setEasingCurve(QEasingCurve.InCubic)
         anim.finished.connect(panel.hide)
         anim.start()
-        panel._slide_anim = anim
+        panel._slide_anim = anim  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
-    # 视图切换
+    # 视图交互
     # ------------------------------------------------------------------
-
-    @Slot()
-    def show_map(self) -> None:
-        """切换到地图视图."""
-        self._animate_view_switch(0)
-        self._refresh_stats()
 
     @Slot(str)
     def _on_province_clicked(self, province_name: str) -> None:
-        """处理省份点击: 切换到照片网格."""
+        """处理省份点击/选中: 地图飞行 + 侧边栏照片 Tab 加载."""
         if not province_name:
             return
-        self._province_list.hide()
+        logger.info("选中省份: %s", province_name)
         self._settings_panel.hide()
-        logger.info("切换到省份: %s", province_name)
+        self._map_view.highlight(province_name)
         self._photo_grid.load_province(province_name)
-        self._animate_view_switch(1)
+        self._sidebar.setCurrentIndex(1)
+        # 自动展开 sidebar 如果处于折叠状态
+        sizes = self._splitter.sizes()
+        if sizes[0] == 0:
+            w = getattr(self, '_sidebar_last_width', 320)
+            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
 
     @Slot()
     def _on_unclassified_clicked(self) -> None:
         """显示未分类照片."""
         self._photo_grid.load_province("Unclassified")
-        self._animate_view_switch(1)
+        self._sidebar.setCurrentIndex(1)
+        sizes = self._splitter.sizes()
+        if sizes[0] == 0:
+            w = getattr(self, '_sidebar_last_width', 320)
+            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
 
-    def _animate_view_switch(self, target_index: int) -> None:
-        if self._stack.currentIndex() == target_index:
+    @Slot(list)
+    def _on_cluster_clicked(self, ids: list[int]) -> None:
+        """聚类点击：加载对应照片到 sidebar 照片 Tab."""
+        if not ids:
             return
-
-        effect = QGraphicsOpacityEffect(self._stack)
-        self._stack.setGraphicsEffect(effect)
-
-        anim = QPropertyAnimation(effect, b"opacity")
-        anim.setDuration(150)
-        anim.setStartValue(1.0)
-        anim.setEndValue(0.0)
-        anim.setEasingCurve(QEasingCurve.InCubic)
-
-        def on_faded_out():
-            self._stack.setCurrentIndex(target_index)
-            anim2 = QPropertyAnimation(effect, b"opacity")
-            anim2.setDuration(150)
-            anim2.setStartValue(0.0)
-            anim2.setEndValue(1.0)
-            anim2.setEasingCurve(QEasingCurve.OutCubic)
-            anim2.finished.connect(lambda: self._stack.setGraphicsEffect(None))
-            anim2.start()
-            self._view_fade_anim2 = anim2
-
-        anim.finished.connect(on_faded_out)
-        anim.start()
-        self._view_fade_anim = anim
+        self._photo_grid.load_photo_ids(ids, title="选中区域")
+        self._sidebar.setCurrentIndex(1)
+        sizes = self._splitter.sizes()
+        if sizes[0] == 0:
+            w = getattr(self, '_sidebar_last_width', 320)
+            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
 
     @Slot(str, object, int)
     def _on_photo_double_clicked(
@@ -359,6 +379,14 @@ class MainWindow(QMainWindow):
         total = self._db.get_total_photo_count()
         self._photo_count_label.setText(f"照片总数: {total}")
 
+    def _load_all_photo_coords(self) -> None:
+        """加载所有带坐标照片供地图聚类渲染."""
+        try:
+            photos = self._db.get_photo_coords()
+            self._map_view.set_photo_coords(photos)
+        except Exception as e:
+            logger.warning("加载照片坐标失败: %s", e)
+
     # ------------------------------------------------------------------
     # 菜单动作
     # ------------------------------------------------------------------
@@ -381,7 +409,6 @@ class MainWindow(QMainWindow):
                 "空间索引未加载, 请先放置 china_provinces.geojson 到 data/ 目录。",
             )
             return
-
         self._status_bar.showMessage(f"正在扫描: {directory} ...")
         self._run_scan([directory])
 
@@ -391,6 +418,7 @@ class MainWindow(QMainWindow):
         self._db.remove_directory(path)
         self._init_settings_panel()
         self._refresh_stats()
+        self._load_all_photo_coords()
 
     def _on_rescan_all(self) -> None:
         """重新扫描所有已注册目录."""
@@ -398,20 +426,15 @@ class MainWindow(QMainWindow):
         if not dirs:
             QMessageBox.information(self, "提示", "没有已注册的扫描目录, 请先导入照片目录。")
             return
-
         if self._spatial_index is None:
             QMessageBox.warning(self, "无法扫描", "空间索引未加载。")
             return
-
         paths = [d["path"] for d in dirs]
         self._status_bar.showMessage("正在重新扫描所有目录...")
         self._run_scan(paths)
 
     def _run_scan(self, directories: list[str]) -> None:
-        """启动异步扫描任务.
-
-        (延迟导入避免循环依赖——workers 依赖本模块的 signal)
-        """
+        """启动异步扫描任务."""
         from geotrace.workers.scan import ScanWorker
 
         self._scan_thread = QThread()
@@ -452,9 +475,9 @@ class MainWindow(QMainWindow):
     def _on_about(self) -> None:
         QMessageBox.about(
             self, "关于 GeoTrace (迹点)",
-            "<h3>GeoTrace (迹点) v0.1.0</h3>"
+            "<h3>GeoTrace (迹点) V2.0</h3>"
             "<p>离线照片地理聚合与检索应用</p>"
-            "<p>基于 Python + PySide6 构建，原生 QPainter 手绘地图</p>",
+            "<p>基于 Python + PySide6 构建，Web Mercator 瓦片引擎 + 原生 QPainter 叠加</p>",
         )
 
     # ------------------------------------------------------------------
@@ -474,6 +497,7 @@ class MainWindow(QMainWindow):
         self._settings_panel.hide_progress()
         self._init_settings_panel()
         self._refresh_stats()
+        self._load_all_photo_coords()
 
     @Slot(str)
     def _on_scan_error(self, message: str) -> None:

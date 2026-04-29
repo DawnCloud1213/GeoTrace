@@ -1,29 +1,38 @@
-"""QWidget + QPainter 直接绘制中国地图 — 不依赖 QGraphicsView.
+"""QWidget + QPainter 绘制中国地图 — Web Mercator 瓦片 + 省份叠加 + 聚类.
 
-QGraphicsView 的 Item 事件分发在复杂几何场景下不可靠,
-改用最底层 QPainter 手绘 + 直接鼠标事件处理, 保证交互可靠.
+V2.0 架构 (三层绘制):
+  1. 底层: TileManager 拼接 XYZ 瓦片 (Mercator 像素坐标系).
+  2. 中层: QPainterPath 省份多边形 (WGS84 → Mercator 投影后缓存).
+  3. 上层: GridClusterer 照片聚类 (屏幕像素坐标系绘制).
+
+坐标系约定:
+  - 场景坐标 = Mercator 像素 (于当前 zoom 层级).
+  - 屏幕坐标 = widget 本地像素.
+  - 变换: screen = scene - center_px + viewport_center
+          (因为 1 Mercator 像素 ≡ 1 屏幕像素, 仅做平移).
 """
+
+from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEasingCurve, QPointF, QRectF, QVariantAnimation, Signal
 from PySide6.QtGui import (
-    QBrush,
-    QColor,
-    QFont,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPolygonF,
-    QTransform,
+    QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF,
 )
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+)
 
-from shapely.geometry import MultiPolygon, Polygon, mapping, shape
+from shapely.geometry import MultiPolygon, Point, Polygon, mapping, shape
 
 from geotrace.ui.bridge import MapBridge
+from geotrace.ui.map_animation import MapViewAnimator, compute_fit_zoom_and_center
+from geotrace.ui.map_core import MercatorProjection, TileManager, MAX_ZOOM, MIN_ZOOM
+from geotrace.ui.marker_cluster import ClusterRenderer, GridClusterer
 from geotrace.ui.theme import Colors
 
 logger = logging.getLogger(__name__)
@@ -42,8 +51,11 @@ _BORDER_COLOR = QColor(200, 184, 152)
 _HOVER_BORDER = QColor(0xFF, 0x70, 0x43)
 _HOVER_GLOW = QColor(0xFF, 0x70, 0x43, 40)
 
-# 大陆主体范围 (过滤南海诸岛对初始视图的影响)
+# 大陆主体 WGS84 范围 (用于初始视图)
 _MAINLAND_BOUNDS = (73.5, 18.0, 135.1, 53.6)
+
+# 标签显隐 zoom 阈值
+_LABEL_ZOOM_THRESHOLD = 6.0
 
 
 def _heat_color(value: int, max_val: int) -> QColor:
@@ -74,63 +86,62 @@ def _abbreviate(name: str) -> str:
     return name
 
 
-def _geom_to_painter_path(geom) -> QPainterPath:
-    """Shapely Polygon/MultiPolygon → QPainterPath (lng→X, lat→Y)."""
-
-    def _add_rings(path: QPainterPath, poly: Polygon) -> None:
-        for ring in [poly.exterior] + list(poly.interiors):
-            pts = list(ring.coords)
-            if len(pts) < 3:
-                continue
-            qpf = QPolygonF()
-            for x, y in pts:
-                qpf.append(QPointF(x, y))
-            path.addPolygon(qpf)
-
-    path = QPainterPath()
-    path.setFillRule(Qt.OddEvenFill)
-    if isinstance(geom, Polygon):
-        _add_rings(path, geom)
-    elif isinstance(geom, MultiPolygon):
-        for poly in geom.geoms:
-            _add_rings(path, poly)
-    return path
-
-
 class _MapCanvas(QWidget):
-    """手绘地图画布 — 处理绘制 + 所有鼠标交互."""
+    """手绘地图画布 — Mercator 坐标系 + 瓦片 + 省份 + 聚类."""
 
     provinceClicked = Signal(str)
     hoveredChanged = Signal(str)
+    clusterClicked = Signal(list)  # list[int] 照片 id 列表
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, tile_manager: TileManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._provinces: list[tuple[str, QPainterPath]] = []
-        self._colors: dict[str, QColor] = {}
-        self._hovered: str = ""
+        self._tile_manager = tile_manager
 
-        # 省份邻接关系: 全名 → 相邻省份全名集合
-        self._neighbors: dict[str, set[str]] = {}
-        # 当前受悬停增强的省份集合 (悬停省 + 邻居)
-        self._hovered_neighbors: set[str] = set()
-
-        # 视图状态: 场景坐标中心 和 缩放 (像素/度)
-        self._cx = (_MAINLAND_BOUNDS[0] + _MAINLAND_BOUNDS[2]) / 2.0
-        self._cy = (_MAINLAND_BOUNDS[1] + _MAINLAND_BOUNDS[3]) / 2.0
-        self._scale = 1.0
-        self._initial_view_set = False
-        self._initial_scale: float = 1.0
-
-        # 标签: [(简称, 全名, lng, lat), ...]
+        # ── 省份数据 ──
+        # WGS84 Shapely 几何体 (用于碰撞检测和投影缓存键)
+        self._province_geoms: dict[str, object] = {}
+        # Mercator 像素路径缓存 (key = name, value = QPainterPath)
+        self._province_paths: dict[str, QPainterPath] = {}
+        self._cached_zoom: float = -1.0
+        self._province_colors: dict[str, QColor] = {}
+        self._province_neighbors: dict[str, set[str]] = {}
+        # (简称, 全名, lng, lat) — WGS84 代表点
         self._labels: list[tuple[str, str, float, float]] = []
 
-        # 动画状态: 当前插值
+        # ── 视图状态 (Mercator 像素) ──
+        self._zoom: float = 4.0
+        self._center_px: float = 0.0
+        self._center_py: float = 0.0
+        self._initial_view_set = False
+
+        # ── 悬停 ──
+        self._hovered: str = ""
+        self._hovered_neighbors: set[str] = set()
+
+        # ── 动画 ──
         self._label_opacity_value: float = 0.0
         self._hover_boost_value: float = 0.0
+        self._label_opacity_anim = QVariantAnimation(self)
+        self._label_opacity_anim.setDuration(200)
+        self._label_opacity_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._label_opacity_anim.valueChanged.connect(self._on_label_opacity_changed)
 
-        # 鼠标状态
+        self._hover_boost_anim = QVariantAnimation(self)
+        self._hover_boost_anim.setDuration(200)
+        self._hover_boost_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._hover_boost_anim.valueChanged.connect(self._on_hover_boost_changed)
+
+        self._animator = MapViewAnimator(self)
+        self._animator.set_callback(self._on_anim_frame)
+
+        # ── 聚类 ──
+        self._clusterer = GridClusterer(cell_px=50)
+        self._cluster_renderer = ClusterRenderer()
+        self._photo_coords: list[dict] = []  # 当前渲染的照片坐标集
+
+        # ── 鼠标 ──
         self._press_pos: QPointF | None = None
-        self._press_scene_center: tuple[float, float] = (0.0, 0.0)
+        self._press_center: tuple[float, float] = (0.0, 0.0)
         self._dragging = False
         self._drag_threshold = 3
 
@@ -138,29 +149,17 @@ class _MapCanvas(QWidget):
         self.setCursor(Qt.OpenHandCursor)
         self.setMinimumSize(400, 300)
 
-        # 标签透明度动画 (缩放跨越 110% 阈值时触发)
-        self._label_opacity_anim = QVariantAnimation(self)
-        self._label_opacity_anim.setDuration(200)
-        self._label_opacity_anim.setEasingCurve(QEasingCurve.InOutCubic)
-        self._label_opacity_anim.valueChanged.connect(self._on_label_opacity_changed)
-
-        # 悬停增强动画 (鼠标进入/离开省份时触发)
-        self._hover_boost_anim = QVariantAnimation(self)
-        self._hover_boost_anim.setDuration(200)
-        self._hover_boost_anim.setEasingCurve(QEasingCurve.InOutCubic)
-        self._hover_boost_anim.valueChanged.connect(self._on_hover_boost_changed)
-
     # ------------------------------------------------------------------
     # 数据加载
     # ------------------------------------------------------------------
 
     def load_provinces(self, features: list[dict]) -> None:
-        self._provinces.clear()
-        self._colors.clear()
+        self._province_geoms.clear()
+        self._province_paths.clear()
+        self._cached_zoom = -1.0
+        self._province_colors.clear()
+        self._province_neighbors.clear()
         self._labels.clear()
-        self._neighbors.clear()
-
-        _temp_geoms: dict[str, object] = {}
 
         for feat in features:
             props = feat.get("properties", {})
@@ -180,28 +179,24 @@ class _MapCanvas(QWidget):
                 logger.warning("解析 '%s' 几何体失败: %s", name, e)
                 continue
 
-            _temp_geoms[name] = geom
+            self._province_geoms[name] = geom
+            self._province_colors[name] = _DEFAULT_FILL
 
-            path = _geom_to_painter_path(geom)
-            self._provinces.append((name, path))
-            self._colors[name] = _DEFAULT_FILL
-
-            # 计算标签位置 (省内代表点)
             try:
                 rpt = geom.representative_point()
                 self._labels.append((_abbreviate(name), name, rpt.x, rpt.y))
             except Exception:
                 pass
 
-        # 计算省份邻接关系 (touches + 距离回退)
-        names = list(_temp_geoms.keys())
+        # 邻接关系
+        names = list(self._province_geoms.keys())
         for i, name1 in enumerate(names):
-            g1 = _temp_geoms[name1]
+            g1 = self._province_geoms[name1]
             nb: set[str] = set()
             for j, name2 in enumerate(names):
                 if i == j:
                     continue
-                g2 = _temp_geoms[name2]
+                g2 = self._province_geoms[name2]
                 try:
                     if g1.touches(g2):
                         nb.add(name2)
@@ -209,7 +204,7 @@ class _MapCanvas(QWidget):
                         nb.add(name2)
                 except Exception:
                     pass
-            self._neighbors[name1] = nb
+            self._province_neighbors[name1] = nb
 
         self._initial_view_set = False
         self._try_compute_initial_view()
@@ -217,43 +212,101 @@ class _MapCanvas(QWidget):
 
     def set_province_colors(self, values: dict[str, int], max_val: int) -> None:
         max_val = max(max_val, 1)
-        for name in self._colors:
+        for name in self._province_colors:
             val = values.get(name, 0)
-            self._colors[name] = _heat_color(val, max_val)
+            self._province_colors[name] = _heat_color(val, max_val)
+        self.update()
+
+    def set_photo_coords(self, photos: list[dict]) -> None:
+        """设置当前应渲染聚类的照片坐标列表."""
+        self._photo_coords = photos
         self.update()
 
     def highlight(self, name: str) -> None:
-        """将指定省份移动到视图中心并放大."""
-        for pname, path in self._provinces:
-            if pname == name:
-                r = path.boundingRect()
-                self._cx = r.center().x()
-                self._cy = r.center().y()
-                # 缩放至适合窗口
-                w, h = self.width(), self.height()
-                if w > 0 and h > 0 and r.width() > 0:
-                    self._scale = min(w / r.width(), h / r.height()) * 0.85
-                self._update_label_opacity_target()
-                self.update()
-                return
+        """平滑飞行到指定省份的 Bounding Box."""
+        geom = self._province_geoms.get(name)
+        if geom is None:
+            return
+        bounds = geom.bounds  # (min_lng, min_lat, max_lng, max_lat)
+        target_px, target_py, target_zoom = compute_fit_zoom_and_center(
+            bounds[0], bounds[1], bounds[2], bounds[3],
+            self.width(), self.height(),
+        )
+        self._animator.fly_to(
+            self._center_px, self._center_py, self._zoom,
+            target_px, target_py, target_zoom,
+        )
 
     # ------------------------------------------------------------------
-    # 坐标变换
+    # 动画帧回调
     # ------------------------------------------------------------------
 
-    def _make_transform(self) -> QTransform:
-        """构建 场景 → 控件 的变换矩阵."""
-        t = QTransform()
-        t.translate(self.width() / 2.0, self.height() / 2.0)
-        t.scale(self._scale, -self._scale)
-        t.translate(-self._cx, -self._cy)
-        return t
+    def _on_anim_frame(self, px: float, py: float, zoom: float) -> None:
+        self._center_px = px
+        self._center_py = py
+        self._zoom = zoom
+        self._invalidate_paths()
+        self._update_label_opacity_target()
+        self.update()
 
-    def _screen_to_scene(self, sx: float, sy: float) -> tuple[float, float]:
-        """屏幕坐标 → 场景坐标."""
-        scx = (sx - self.width() / 2.0) / self._scale + self._cx
-        scy = -(sy - self.height() / 2.0) / self._scale + self._cy
-        return scx, scy
+    # ------------------------------------------------------------------
+    # 路径缓存
+    # ------------------------------------------------------------------
+
+    def _invalidate_paths(self) -> None:
+        self._province_paths.clear()
+        self._cached_zoom = -1.0
+
+    def _get_province_paths(self) -> dict[str, QPainterPath]:
+        if abs(self._cached_zoom - self._zoom) > 0.001 or not self._province_paths:
+            self._province_paths.clear()
+            for name, geom in self._province_geoms.items():
+                self._province_paths[name] = self._build_mercator_path(geom, self._zoom)
+            self._cached_zoom = self._zoom
+        return self._province_paths
+
+    def _build_mercator_path(self, geom, zoom: float) -> QPainterPath:
+        """Shapely → QPainterPath (顶点为 Mercator 像素)."""
+
+        def _add_rings(path: QPainterPath, poly: Polygon) -> None:
+            for ring in [poly.exterior] + list(poly.interiors):
+                pts = list(ring.coords)
+                if len(pts) < 3:
+                    continue
+                qpf = QPolygonF()
+                for lng, lat in pts:
+                    px, py = MercatorProjection.lnglat_to_pixel(lng, lat, zoom)
+                    qpf.append(QPointF(px, py))
+                path.addPolygon(qpf)
+
+        path = QPainterPath()
+        path.setFillRule(Qt.OddEvenFill)
+        if isinstance(geom, Polygon):
+            _add_rings(path, geom)
+        elif isinstance(geom, MultiPolygon):
+            for poly in geom.geoms:
+                _add_rings(path, poly)
+        return path
+
+    # ------------------------------------------------------------------
+    # 初始视图
+    # ------------------------------------------------------------------
+
+    def _try_compute_initial_view(self) -> None:
+        if (not self._initial_view_set
+                and self._province_geoms
+                and self.width() > 100
+                and self.height() > 100):
+            self._compute_initial_view()
+            self._initial_view_set = True
+
+    def _compute_initial_view(self) -> None:
+        min_lng, min_lat, max_lng, max_lat = _MAINLAND_BOUNDS
+        self._center_px, self._center_py, self._zoom = compute_fit_zoom_and_center(
+            min_lng, min_lat, max_lng, max_lat,
+            self.width(), self.height(),
+        )
+        self._update_label_opacity_target()
 
     # ------------------------------------------------------------------
     # 标签动画
@@ -268,17 +321,10 @@ class _MapCanvas(QWidget):
         self.update()
 
     def _update_label_opacity_target(self) -> None:
-        if self._initial_scale <= 0:
-            target = 0.0
-        elif self._scale < self._initial_scale * 1.10:
-            target = 0.0
-        else:
-            target = 60.0 / 255.0
-
+        target = 60.0 / 255.0 if self._zoom >= _LABEL_ZOOM_THRESHOLD else 0.0
         current = self._label_opacity_value
         if abs(current - target) < 0.001:
             return
-
         self._label_opacity_anim.stop()
         self._label_opacity_anim.setStartValue(current)
         self._label_opacity_anim.setEndValue(target)
@@ -287,40 +333,16 @@ class _MapCanvas(QWidget):
     def _update_hover_boost_target(self) -> None:
         target = 1.0 if self._hovered else 0.0
         current = self._hover_boost_value
-
         if abs(current - target) < 0.001:
             return
-
         self._hover_boost_anim.stop()
         self._hover_boost_anim.setStartValue(current)
         self._hover_boost_anim.setEndValue(target)
         self._hover_boost_anim.start()
 
-    def _compute_initial_view(self) -> None:
-        """计算初始视图: 大陆主体填充窗口."""
-        min_x, min_y, max_x, max_y = _MAINLAND_BOUNDS
-        w, h = self.width(), self.height()
-        if w <= 0 or h <= 0:
-            return
-        rw = max_x - min_x
-        rh = max_y - min_y
-        if rw <= 0 or rh <= 0:
-            return
-        self._scale = min(w / rw, h / rh) * 1.05
-        self._initial_scale = self._scale
-        self._cx = (min_x + max_x) / 2.0
-        self._cy = (min_y + max_y) / 2.0
-        self._update_label_opacity_target()
-
     # ------------------------------------------------------------------
-    # 绘制
+    # 绘制 (三层)
     # ------------------------------------------------------------------
-
-    def _try_compute_initial_view(self) -> None:
-        """load_provinces 和 resizeEvent 都会调用，确保无论时序如何都能算初始视图."""
-        if not self._initial_view_set and self._provinces and self.width() > 100 and self.height() > 100:
-            self._compute_initial_view()
-            self._initial_view_set = True
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -329,29 +351,35 @@ class _MapCanvas(QWidget):
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QBrush(_BG_COLOR))
 
-        if not self._provinces:
+        # ── Layer 1: 瓦片底层 ──
+        self._tile_manager.paint_tiles(
+            p, self.rect(), self._zoom, self._center_px, self._center_py,
+        )
+
+        if not self._province_geoms:
+            p.end()
             return
 
-        t = self._make_transform()
-        p.setTransform(t)
+        # 中层与上层共享同一视口平移变换
+        p.save()
+        p.translate(self.width() / 2.0 - self._center_px,
+                    self.height() / 2.0 - self._center_py)
 
-        # 笔宽随缩放反比
-        pen_w = 0.5 / self._scale
+        paths = self._get_province_paths()
+        pen_w = 0.5  # 像素单位
 
-        # Phase 1: 填充所有省份 + 绘制非悬停省份的普通边框
-        for name, path in self._provinces:
-            color = self._colors.get(name, _DEFAULT_FILL)
+        # ── Layer 2a: 填充 + 普通边框 ──
+        for name, path in paths.items():
+            color = self._province_colors.get(name, _DEFAULT_FILL)
             p.fillPath(path, QBrush(color))
-
             if name != self._hovered:
                 p.setPen(QPen(_BORDER_COLOR, pen_w))
                 p.drawPath(path)
 
-        # Phase 2: 在最上层绘制悬停省份的发光 + 加粗边框 (避免被相邻省边框覆盖)
+        # ── Layer 2b: 悬停发光 (最上层防止被邻省遮挡) ──
         if self._hovered:
-            for name, path in self._provinces:
+            for name, path in paths.items():
                 if name == self._hovered:
                     glow_pen = QPen(_HOVER_GLOW, pen_w * 10)
                     glow_pen.setJoinStyle(Qt.RoundJoin)
@@ -364,49 +392,71 @@ class _MapCanvas(QWidget):
                     p.drawPath(path)
                     break
 
-        # 省份简称标签 — 双显示逻辑: 缩放 ≥ 110% 时半透明显示, 悬停省+邻居不透明放大
-        if self._labels:
-            base_opacity = self._label_opacity_value
-            boost = self._hover_boost_value
-            base_font_size = max(8, min(16, int(10 * self._scale ** 0.4)))
+        # ── Layer 2c: 省份标签 ──
+        self._paint_labels(p)
 
-            if not (base_opacity < 0.004 and boost < 0.004):
-                p.resetTransform()
+        p.restore()
 
-                for abbr, full_name, lng, lat in self._labels:
-                    sx = t.map(QPointF(lng, lat))
-                    if sx.x() < -60 or sx.x() > self.width() + 60:
-                        continue
-                    if sx.y() < -40 or sx.y() > self.height() + 40:
-                        continue
+        # ── Layer 3: 聚类顶层 (屏幕坐标系, 不走场景变换) ──
+        if self._photo_coords:
+            clusters = self._clusterer.cluster(
+                self._photo_coords, self._zoom,
+                self.width(), self.height(),
+                self._center_px, self._center_py,
+            )
+            self._cluster_renderer.paint(p, clusters)
 
-                    is_highlighted = (
-                        self._hovered != ""
-                        and (full_name == self._hovered
-                             or full_name in self._hovered_neighbors)
-                    )
+    def _paint_labels(self, painter: QPainter) -> None:
+        if not self._labels:
+            return
+        base_opacity = self._label_opacity_value
+        boost = self._hover_boost_value
+        if base_opacity < 0.004 and boost < 0.004:
+            return
 
-                    if is_highlighted:
-                        label_alpha_f = base_opacity + boost * (1.0 - base_opacity)
-                        fs = base_font_size * (1.0 + 0.12 * boost)
-                    else:
-                        label_alpha_f = base_opacity
-                        fs = base_font_size
+        # 字体大小随 zoom 对数增长
+        base_font_size = max(8, min(16, int(10 * self._zoom ** 0.4)))
 
-                    alpha_int = int(label_alpha_f * 255)
-                    if alpha_int < 2:
-                        continue
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        for abbr, full_name, lng, lat in self._labels:
+            px, py = MercatorProjection.lnglat_to_pixel(lng, lat, self._zoom)
+            sx = px - self._center_px + self.width() / 2.0
+            sy = py - self._center_py + self.height() / 2.0
 
-                    font = p.font()
-                    font.setPixelSize(max(1, int(fs)))
-                    font.setBold(True)
-                    p.setFont(font)
+            if sx < -60 or sx > self.width() + 60:
+                continue
+            if sy < -40 or sy > self.height() + 40:
+                continue
 
-                    shadow_a = min(140, alpha_int)
-                    p.setPen(QColor(254, 249, 240, shadow_a))
-                    p.drawText(sx + QPointF(1, 1), abbr)
-                    p.setPen(QColor(80, 50, 20, alpha_int))
-                    p.drawText(sx, abbr)
+            is_highlighted = (
+                self._hovered != ""
+                and (full_name == self._hovered
+                     or full_name in self._hovered_neighbors)
+            )
+
+            if is_highlighted:
+                label_alpha_f = base_opacity + boost * (1.0 - base_opacity)
+                fs = base_font_size * (1.0 + 0.12 * boost)
+            else:
+                label_alpha_f = base_opacity
+                fs = base_font_size
+
+            alpha_int = int(label_alpha_f * 255)
+            if alpha_int < 2:
+                continue
+
+            font = painter.font()
+            font.setPixelSize(max(1, int(fs)))
+            font.setBold(True)
+            painter.setFont(font)
+
+            shadow_a = min(140, alpha_int)
+            painter.setPen(QColor(254, 249, 240, shadow_a))
+            painter.drawText(QPointF(sx + 1, sy + 1), abbr)
+            painter.setPen(QColor(80, 50, 20, alpha_int))
+            painter.drawText(QPointF(sx, sy), abbr)
+
+        painter.setRenderHint(QPainter.Antialiasing, True)
 
     # ------------------------------------------------------------------
     # 鼠标事件
@@ -415,23 +465,22 @@ class _MapCanvas(QWidget):
     def wheelEvent(self, event) -> None:
         dy = event.angleDelta().y()
         factor = 1.12 ** (dy / 120.0)
-        new_scale = self._scale * factor
+        delta_zoom = math.log2(factor)
+        new_zoom = self._zoom + delta_zoom
+        new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, new_zoom))
 
-        if new_scale < 5.0:
-            factor = 5.0 / self._scale
-        elif new_scale > 800.0:
-            factor = 800.0 / self._scale
-
-        # 以鼠标位置为中心缩放
+        # 以鼠标锚点缩放: 保持鼠标下地理点不变
         mx, my = event.position().x(), event.position().y()
-        scx, scy = self._screen_to_scene(mx, my)
+        old_mpx = self._center_px + (mx - self.width() / 2.0)
+        old_mpy = self._center_py + (my - self.height() / 2.0)
+        lng, lat = MercatorProjection.pixel_to_lnglat(old_mpx, old_mpy, self._zoom)
+        new_mpx, new_mpy = MercatorProjection.lnglat_to_pixel(lng, lat, new_zoom)
 
-        self._scale *= factor
-        # 调整中心使鼠标下的场景点保持不动
-        new_scx, new_scy = self._screen_to_scene(mx, my)
-        self._cx += scx - new_scx
-        self._cy += scy - new_scy
+        self._center_px = new_mpx - (mx - self.width() / 2.0)
+        self._center_py = new_mpy - (my - self.height() / 2.0)
+        self._zoom = new_zoom
 
+        self._invalidate_paths()
         self._update_hover(event.position())
         self._update_label_opacity_target()
         self.update()
@@ -439,7 +488,7 @@ class _MapCanvas(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._press_pos = event.position()
-            self._press_scene_center = (self._cx, self._cy)
+            self._press_center = (self._center_px, self._center_py)
             self._dragging = False
             self.setCursor(Qt.ClosedHandCursor)
 
@@ -449,9 +498,9 @@ class _MapCanvas(QWidget):
             if not self._dragging and delta.manhattanLength() > self._drag_threshold:
                 self._dragging = True
             if self._dragging:
-                # 拖拽: 场景中心反向移动
-                self._cx = self._press_scene_center[0] - delta.x() / self._scale
-                self._cy = self._press_scene_center[1] + delta.y() / self._scale
+                # 1:1 平移 (Mercator 像素 = 屏幕像素)
+                self._center_px = self._press_center[0] - delta.x()
+                self._center_py = self._press_center[1] - delta.y()
                 self.update()
         else:
             self._update_hover(event.position())
@@ -459,14 +508,45 @@ class _MapCanvas(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             if not self._dragging and self._press_pos is not None:
-                # 点击检测
-                scx, scy = self._screen_to_scene(
-                    event.position().x(), event.position().y(),
-                )
-                for name, path in self._provinces:
-                    if path.contains(QPointF(scx, scy)):
-                        self.provinceClicked.emit(name)
-                        break
+                mx, my = event.position().x(), event.position().y()
+
+                # 先检测聚类点击
+                if self._photo_coords:
+                    clusters = self._clusterer.cluster(
+                        self._photo_coords, self._zoom,
+                        self.width(), self.height(),
+                        self._center_px, self._center_py,
+                    )
+                    for c in clusters:
+                        dx = mx - c.screen_x
+                        dy = my - c.screen_y
+                        if c.count > 1:
+                            radius = max(14, int(10 + math.log2(c.count + 1) * 6))
+                            if dx * dx + dy * dy <= radius * radius:
+                                self.clusterClicked.emit(c.ids)
+                                self._press_pos = None
+                                self.setCursor(Qt.OpenHandCursor)
+                                return
+                        else:
+                            if dx * dx + dy * dy <= (SINGLE_SIZE / 2.0 + 4) ** 2:
+                                self.clusterClicked.emit(c.ids)
+                                self._press_pos = None
+                                self.setCursor(Qt.OpenHandCursor)
+                                return
+
+                # 再检测省份点击
+                mpx = self._center_px + (mx - self.width() / 2.0)
+                mpy = self._center_py + (my - self.height() / 2.0)
+                lng, lat = MercatorProjection.pixel_to_lnglat(mpx, mpy, self._zoom)
+                point = Point(lng, lat)
+                for name, geom in self._province_geoms.items():
+                    try:
+                        if geom.contains(point) or point.within(geom):
+                            self.provinceClicked.emit(name)
+                            break
+                    except Exception:
+                        continue
+
             self._press_pos = None
             self._dragging = False
             self.setCursor(Qt.OpenHandCursor)
@@ -480,20 +560,28 @@ class _MapCanvas(QWidget):
             self.update()
 
     # ------------------------------------------------------------------
-    # 悬停
+    # 悬停检测 (WGS84 Shapely 精确碰撞)
     # ------------------------------------------------------------------
 
     def _update_hover(self, screen_pos: QPointF) -> None:
-        scx, scy = self._screen_to_scene(screen_pos.x(), screen_pos.y())
+        mpx = self._center_px + (screen_pos.x() - self.width() / 2.0)
+        mpy = self._center_py + (screen_pos.y() - self.height() / 2.0)
+        lng, lat = MercatorProjection.pixel_to_lnglat(mpx, mpy, self._zoom)
+        point = Point(lng, lat)
+
         hit = ""
-        for name, path in self._provinces:
-            if path.contains(QPointF(scx, scy)):
-                hit = name
-                break
+        for name, geom in self._province_geoms.items():
+            try:
+                if geom.contains(point) or point.within(geom):
+                    hit = name
+                    break
+            except Exception:
+                continue
+
         if hit != self._hovered:
             self._hovered = hit
-            if hit and hit in self._neighbors:
-                self._hovered_neighbors = self._neighbors[hit] | {hit}
+            if hit and hit in self._province_neighbors:
+                self._hovered_neighbors = self._province_neighbors[hit] | {hit}
             elif hit:
                 self._hovered_neighbors = {hit}
             else:
@@ -503,13 +591,18 @@ class _MapCanvas(QWidget):
             self.update()
 
 
+# 复用 marker_cluster 常量
+from geotrace.ui.marker_cluster import SINGLE_SIZE  # noqa: E402
+
+
 class MapWidget(QWidget):
-    """原生地图组件 — 与旧 MapView 保持相同的 bridge 接口."""
+    """原生地图组件 — Mercator V2."""
 
     toggleProvinceList = Signal()
     toggleSettings = Signal()
+    clusterClicked = Signal(list)  # 透传 canvas 信号
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._bridge = MapBridge()
         self._geo_json_loaded = False
@@ -518,9 +611,20 @@ class MapWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._canvas = _MapCanvas(self)
+        # TileManager (可选 MBTiles)
+        data_dir = Path(__file__).parent.parent.parent / "data"
+        mbtiles_path = data_dir / "tiles.mbtiles"
+        self._tile_manager = TileManager(
+            mbtiles_path if mbtiles_path.exists() else None,
+            placeholder_color=_BG_COLOR,
+            parent=self,
+        )
+        self._tile_manager.tileLoaded.connect(self.update)
+
+        self._canvas = _MapCanvas(self._tile_manager, self)
         self._canvas.provinceClicked.connect(self._on_province_clicked)
         self._canvas.hoveredChanged.connect(self._on_hovered_changed)
+        self._canvas.clusterClicked.connect(self.clusterClicked.emit)
         layout.addWidget(self._canvas)
 
         # 浮动按钮
@@ -538,7 +642,17 @@ class MapWidget(QWidget):
         self._btn_settings.setProperty("cssClass", "mapOverlay")
         self._btn_settings.clicked.connect(self.toggleSettings.emit)
 
-        # 省份悬停提示
+        # 地图样式切换 (仅 MBTiles 可用时显示)
+        self._btn_style = QPushButton("🗺", self)
+        self._btn_style.setFixedSize(36, 36)
+        self._btn_style.setCursor(Qt.PointingHandCursor)
+        self._btn_style.setToolTip("切换底图")
+        self._btn_style.setProperty("cssClass", "mapOverlay")
+        self._btn_style.setVisible(self._tile_manager.mbtiles_available)
+        self._btn_style.clicked.connect(self._toggle_tile_style)
+        self._tile_style = "tiles"  # "tiles" | "solid"
+
+        # 悬停提示
         self._hover_tooltip = QLabel(self)
         self._hover_tooltip.setStyleSheet(f"""
             QLabel {{
@@ -607,10 +721,12 @@ class MapWidget(QWidget):
         super().resizeEvent(event)
         self._btn_provinces.move(8, 8)
         self._btn_settings.move(self.width() - 44, 8)
+        self._btn_style.move(self.width() - 44, 52)
         self._hover_tooltip.move(50, self.height() - 50)
         self._legend.move(self.width() - 150, self.height() - 100)
         self._btn_provinces.raise_()
         self._btn_settings.raise_()
+        self._btn_style.raise_()
         self._hover_tooltip.raise_()
         self._legend.raise_()
 
@@ -627,7 +743,6 @@ class MapWidget(QWidget):
         if not geojson_path.exists():
             logger.error("GeoJSON 不存在: %s", geojson_path)
             return False
-
         try:
             with open(geojson_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -638,7 +753,7 @@ class MapWidget(QWidget):
         data = self._simplify_geojson(data, tolerance=0.02)
         self._canvas.load_provinces(data.get("features", []))
         self._geo_json_loaded = True
-        logger.info("地图加载完成: %d 个省份", len(self._canvas._provinces))
+        logger.info("地图加载完成: %d 个省份", len(self._canvas._province_geoms))
         self._bridge.mapReady.emit()
         return True
 
@@ -659,7 +774,6 @@ class MapWidget(QWidget):
                 max_val = val
         self._canvas.set_province_colors(values, max_val)
 
-        # 更新图例
         total_photos = sum(values.values())
         self._stats_max_val = max_val
         if total_photos > 0 and max_val > 0:
@@ -668,6 +782,10 @@ class MapWidget(QWidget):
             self._legend.setVisible(True)
         else:
             self._legend.setVisible(False)
+
+    def set_photo_coords(self, photos: list[dict]) -> None:
+        """向地图注入照片坐标以渲染聚类."""
+        self._canvas.set_photo_coords(photos)
 
     def highlight(self, province_name: str) -> None:
         self._canvas.highlight(province_name)
@@ -686,6 +804,17 @@ class MapWidget(QWidget):
             self._hover_tooltip.setVisible(True)
         else:
             self._hover_tooltip.setVisible(False)
+
+    def _toggle_tile_style(self) -> None:
+        """切换底图显示模式 (仅影响 TileManager 占位色, 实际瓦片由 MBTiles 内容决定)."""
+        # 当前简化实现: 切换占位色以模拟不同风格
+        if self._tile_style == "tiles":
+            self._tile_style = "solid"
+            self._tile_manager._placeholder = _BG_COLOR
+        else:
+            self._tile_style = "tiles"
+            self._tile_manager._placeholder = QColor("#E8E0D0")
+        self.update()
 
     # ------------------------------------------------------------------
     # GeoJSON 简化
