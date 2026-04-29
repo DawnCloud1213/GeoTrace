@@ -44,8 +44,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_PHOTOS} (
 
 # 索引
 CREATE_INDEXES = [
-    f"CREATE INDEX IF NOT EXISTS idx_photos_province ON {TABLE_PHOTOS}(province_name);",
-    f"CREATE INDEX IF NOT EXISTS idx_photos_date ON {TABLE_PHOTOS}(date_taken);",
+    f"CREATE INDEX IF NOT EXISTS idx_photos_province_date ON {TABLE_PHOTOS}(province_name, date_taken DESC);",
     f"CREATE INDEX IF NOT EXISTS idx_photos_lat_lng ON {TABLE_PHOTOS}(latitude, longitude);",
     f"CREATE INDEX IF NOT EXISTS idx_photos_file_path ON {TABLE_PHOTOS}(file_path);",
     f"CREATE INDEX IF NOT EXISTS idx_photos_mtime ON {TABLE_PHOTOS}(file_path, file_mtime);",

@@ -258,7 +258,7 @@ class MainWindow(QMainWindow):
         anim.setDuration(200)
         anim.setStartValue(start_geo)
         anim.setEndValue(target_geo)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(QEasingCurve.OutBack)
         anim.start()
         panel._slide_anim = anim
 
@@ -293,6 +293,8 @@ class MainWindow(QMainWindow):
         """处理省份点击: 切换到照片网格."""
         if not province_name:
             return
+        self._province_list.hide()
+        self._settings_panel.hide()
         logger.info("切换到省份: %s", province_name)
         self._photo_grid.load_province(province_name)
         self._animate_view_switch(1)
@@ -331,10 +333,12 @@ class MainWindow(QMainWindow):
         anim.start()
         self._view_fade_anim = anim
 
-    @Slot(str)
-    def _on_photo_double_clicked(self, file_path: str) -> None:
+    @Slot(str, object, int)
+    def _on_photo_double_clicked(
+        self, file_path: str, all_paths: list, index: int,
+    ) -> None:
         """打开大图查看器."""
-        viewer = PhotoViewer(file_path, self)
+        viewer = PhotoViewer(file_path, all_paths, index, self)
         viewer.exec()
 
     @Slot()

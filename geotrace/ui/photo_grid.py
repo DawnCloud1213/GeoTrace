@@ -11,6 +11,7 @@ from typing import Optional
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
+    QObject,
     QSize,
     Qt,
     QThread,
@@ -20,6 +21,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QImageReader,
     QPainter,
     QPainterPath,
     QPen,
@@ -27,6 +29,7 @@ from PySide6.QtGui import (
     QPixmapCache,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QLabel,
     QListView,
@@ -39,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from geotrace.database.manager import DatabaseManager
 from geotrace.ui.theme import Colors, Fonts
+from geotrace.ui.photo_viewer import PhotoViewer
 
 logger = logging.getLogger(__name__)
 
@@ -85,43 +89,25 @@ class PhotoListModel(QAbstractListModel):
     # 数据加载
     # ------------------------------------------------------------------
 
-    def load_province(self, province_name: str) -> None:
-        """加载指定省份的第一页照片."""
-        self._province_name = province_name
-        self._page = 1
-        self._load_page()
+    def set_page_data(self, photos: list[dict], total: int,
+                      append: bool = False) -> int:
+        """填入查询结果 (主线程调用)."""
+        self._total = total
+        if append:
+            start = len(self._photos)
+            self._photos.extend(photos)
+            end = len(self._photos) - 1
+            if start <= end:
+                self.beginInsertRows(QModelIndex(), start, end)
+                self.endInsertRows()
+        else:
+            self.beginResetModel()
+            self._photos = photos
+            self.endResetModel()
+        return len(photos)
 
     def has_more(self) -> bool:
         return len(self._photos) < self._total
-
-    def load_next_page(self) -> int:
-        """加载下一页, 返回新增数量."""
-        if not self.has_more():
-            return 0
-        self._page += 1
-        return self._load_page(append=True)
-
-    def _load_page(self, append: bool = False) -> int:
-        self.beginResetModel()
-
-        if self._province_name == "Unclassified":
-            photos, self._total = self._db.get_unclassified_photos(
-                page=self._page, page_size=PAGE_SIZE,
-            )
-        elif self._province_name:
-            photos, self._total = self._db.query_by_province(
-                self._province_name, page=self._page, page_size=PAGE_SIZE,
-            )
-        else:
-            photos, self._total = [], 0
-
-        if append:
-            self._photos.extend(photos)
-        else:
-            self._photos = photos
-
-        self.endResetModel()
-        return len(photos)
 
     @property
     def total(self) -> int:
@@ -130,6 +116,42 @@ class PhotoListModel(QAbstractListModel):
     @property
     def province_name(self) -> str:
         return self._province_name
+
+    @property
+    def page(self) -> int:
+        return self._page
+
+
+class PhotoQueryWorker(QObject):
+    """后台线程执行 DB 照片查询."""
+    finished = Signal(list, int)  # photos, total
+    error = Signal(str)
+
+    def __init__(self, db: DatabaseManager, province_name: str,
+                 page: int, page_size: int, parent=None) -> None:
+        super().__init__(parent)
+        self._db = db
+        self._province_name = province_name
+        self._page = page
+        self._page_size = page_size
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if self._province_name == "Unclassified":
+                photos, total = self._db.get_unclassified_photos(
+                    page=self._page, page_size=self._page_size,
+                )
+            elif self._province_name:
+                photos, total = self._db.query_by_province(
+                    self._province_name, page=self._page,
+                    page_size=self._page_size,
+                )
+            else:
+                photos, total = [], 0
+            self.finished.emit(photos, total)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class ThumbnailDelegate(QStyledItemDelegate):
@@ -210,21 +232,21 @@ class ThumbnailDelegate(QStyledItemDelegate):
         """从缓存或磁盘加载缩略图 QPixmap."""
         cache_key = file_path
 
-        # QPixmapCache 内存缓存
         pixmap = QPixmap()
         if QPixmapCache.find(cache_key, pixmap):
             return self._scaled_if_needed(pixmap, size)
 
-        # 尝试从磁盘缩略图缓存加载
         source = thumbnail_path or file_path
         if not Path(source).exists():
             return None
 
-        if pixmap.load(source):
+        reader = QImageReader(source)
+        reader.setAutoTransform(True)
+        reader.setScaledSize(size * 2)
+        pixmap = QPixmap.fromImageReader(reader)
+        if not pixmap.isNull():
             scaled = self._scaled_if_needed(pixmap, size)
-            # 只有缩略图缓存才放进 QPixmapCache (原图太大)
-            if thumbnail_path:
-                QPixmapCache.insert(cache_key, scaled)
+            QPixmapCache.insert(cache_key, scaled)
             return scaled
 
         return None
@@ -232,7 +254,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
     @staticmethod
     def _scaled_if_needed(pixmap: QPixmap, size: QSize) -> QPixmap:
         if pixmap.size().width() > size.width() or pixmap.size().height() > size.height():
-            return pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            return pixmap.scaled(size, Qt.KeepAspectRatio, Qt.FastTransformation)
         return pixmap
 
 
@@ -242,12 +264,14 @@ class PhotoGrid(QWidget):
     包含返回按钮、省份标题、照片列表和翻页控制.
     """
 
-    photoDoubleClicked = Signal(str)  # file_path
+    photoDoubleClicked = Signal(str, object, int)  # file_path, all_paths, index
     returnToMap = Signal()
 
     def __init__(self, db: DatabaseManager, parent=None) -> None:
         super().__init__(parent)
         self._db = db
+        QPixmapCache.setCacheLimit(51200)
+        self._is_loading = False
 
         # UI 组件
         self._back_btn = QPushButton("← 返回地图")
@@ -269,16 +293,15 @@ class PhotoGrid(QWidget):
         self._list_view.setBatchSize(30)
         self._list_view.setUniformItemSizes(True)
         self._list_view.setSpacing(8)
+        self._list_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._list_view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self._list_view.verticalScrollBar().setSingleStep(40)
         self._list_view.setStyleSheet(f"""
             QListView {{
                 border: none;
                 background-color: {Colors.WINDOW_BG};
             }}
         """)
-
-        self._load_more_btn = QPushButton("加载更多...")
-        self._load_more_btn.setProperty("cssClass", "primary")
-        self._load_more_btn.setVisible(False)
 
         self._empty_label = QLabel("该省份暂无照片")
         self._empty_label.setAlignment(Qt.AlignCenter)
@@ -295,14 +318,12 @@ class PhotoGrid(QWidget):
         layout.addLayout(top_bar)
         layout.addWidget(self._list_view, 1)
         layout.addWidget(self._empty_label, 1)
-        layout.addWidget(self._load_more_btn)
 
         # 信号连接
         self._back_btn.clicked.connect(self.returnToMap.emit)
         self._list_view.doubleClicked.connect(self._on_double_clicked)
-        self._load_more_btn.clicked.connect(self._load_more)
 
-        # 滚动到底部检测
+        # 滚动到底部自动加载
         self._list_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
     # ------------------------------------------------------------------
@@ -311,15 +332,24 @@ class PhotoGrid(QWidget):
 
     def load_province(self, province_name: str) -> None:
         """加载指定省份的照片."""
+        province_changed = (
+            self._model.province_name
+            and self._model.province_name != province_name
+        )
+        if province_changed:
+            QPixmapCache.clear()
+            self._model.set_page_data([], 0)
+        self._model._province_name = province_name
+        self._model._page = 1
         self._province_label.setText(f"{province_name} (加载中...)")
-        self._model.load_province(province_name)
-        self._update_display()
+        self._empty_label.setVisible(False)
+        self._run_query(page=1, append=False)
 
     def clear(self) -> None:
         """清除当前显示."""
-        self._model.load_province("")
+        self._model._province_name = ""
+        self._model.set_page_data([], 0)
         self._province_label.setText("")
-        self._load_more_btn.setVisible(False)
 
     # ------------------------------------------------------------------
     # 内部逻辑
@@ -338,26 +368,53 @@ class PhotoGrid(QWidget):
             self._province_label.setText(
                 f"{self._model.province_name} (第 {min(count, total)} / {total} 张)"
             )
-        self._load_more_btn.setVisible(self._model.has_more())
-        QPixmapCache.clear()
 
-    def _load_more(self) -> None:
-        self._load_more_btn.setEnabled(False)
-        self._load_more_btn.setText("加载中...")
-        # 使用 QThread 避免阻塞 UI (快速操作, 但保持体验)
-        added = self._model.load_next_page()
+    def _run_query(self, page: int, append: bool) -> None:
+        self._is_loading = True
+        province = self._model.province_name
+        self._query_thread = QThread()
+        self._query_worker = PhotoQueryWorker(
+            self._db, province, page, PAGE_SIZE,
+        )
+        self._query_worker.moveToThread(self._query_thread)
+        self._query_thread.started.connect(self._query_worker.run)
+        self._query_worker.finished.connect(
+            lambda photos, total, p=province, a=append: (
+                self._on_query_finished(photos, total, a)
+                if self._model.province_name == p
+                else setattr(self, '_is_loading', False)
+            ),
+        )
+        self._query_worker.finished.connect(self._query_thread.quit)
+        self._query_worker.finished.connect(self._query_worker.deleteLater)
+        self._query_thread.finished.connect(self._query_thread.deleteLater)
+        self._query_thread.start()
+
+    def _on_query_finished(
+        self, photos: list[dict], total: int, append: bool,
+    ) -> None:
+        self._model.set_page_data(photos, total, append=append)
         self._update_display()
-        self._load_more_btn.setEnabled(self._model.has_more())
-        self._load_more_btn.setText("加载更多...")
-        if added == 0:
-            self._load_more_btn.setVisible(False)
+        self._is_loading = False
 
     def _on_scroll(self, value: int) -> None:
         sb = self._list_view.verticalScrollBar()
-        if sb.value() >= sb.maximum() - 100 and self._model.has_more():
-            self._load_more()
+        if sb.maximum() <= 0:
+            return
+        progress = sb.value() / sb.maximum()
+        if (progress >= 0.50
+                and self._model.has_more()
+                and not self._is_loading):
+            self._model._page += 1
+            self._run_query(page=self._model.page, append=True)
 
-    def _on_double_clicked(self, index: QModelIndex) -> None:
-        file_path = index.data(Qt.UserRole + 1)
-        if file_path:
-            self.photoDoubleClicked.emit(file_path)
+    def _on_double_clicked(self, idx: QModelIndex) -> None:
+        file_path = idx.data(Qt.UserRole + 1)
+        if not file_path:
+            return
+        all_paths = [
+            self._model.index(r, 0).data(Qt.UserRole + 1)
+            for r in range(self._model.rowCount())
+        ]
+        viewer = PhotoViewer(file_path, all_paths, idx.row(), self)
+        viewer.exec()
