@@ -34,17 +34,17 @@ class MapViewAnimator(QVariantAnimation):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.setDuration(600)
-        self.setEasingCurve(QEasingCurve.InOutCubic)
+        self.setEasingCurve(QEasingCurve.InOutQuart)
         self.valueChanged.connect(self._on_value_changed)
 
         self._callback: Callable[[float, float, float], None] | None = None
 
-        self._start_px: float = 0.0
-        self._start_py: float = 0.0
+        self._start_lng: float = 0.0
+        self._start_lat: float = 0.0
         self._start_zoom: float = 4.0
-        self._end_px: float = 0.0
-        self._end_py: float = 0.0
-        self._end_zoom: float = 4.0
+        self._target_lng: float = 0.0
+        self._target_lat: float = 0.0
+        self._target_zoom: float = 4.0
 
     def set_callback(
         self,
@@ -62,14 +62,22 @@ class MapViewAnimator(QVariantAnimation):
         target_center_py: float,
         target_zoom: float,
     ) -> None:
-        """启动飞行动画."""
+        """启动飞行动画.
+
+        为了避免不同 zoom 层级下 Mercator 像素坐标尺度不一致导致的插值畸变，
+         internally 将中心点转换为经纬度进行插值，每帧再转回当前 zoom 的像素坐标。
+        """
         self.stop()
-        self._start_px = start_center_px
-        self._start_py = start_center_py
         self._start_zoom = max(MIN_ZOOM, start_zoom)
-        self._end_px = target_center_px
-        self._end_py = target_center_py
-        self._end_zoom = max(MIN_ZOOM, min(MAX_ZOOM, target_zoom))
+        self._target_zoom = max(MIN_ZOOM, min(MAX_ZOOM, target_zoom))
+
+        # 统一到与 zoom 无关的经纬度坐标系插值
+        self._start_lng, self._start_lat = MercatorProjection.pixel_to_lnglat(
+            start_center_px, start_center_py, start_zoom
+        )
+        self._target_lng, self._target_lat = MercatorProjection.pixel_to_lnglat(
+            target_center_px, target_center_py, target_zoom
+        )
 
         self.setStartValue(0.0)
         self.setEndValue(1.0)
@@ -77,9 +85,10 @@ class MapViewAnimator(QVariantAnimation):
 
     def _on_value_changed(self, value) -> None:
         progress = float(value)
-        px = self._start_px + (self._end_px - self._start_px) * progress
-        py = self._start_py + (self._end_py - self._start_py) * progress
-        zoom = self._start_zoom + (self._end_zoom - self._start_zoom) * progress
+        lng = self._start_lng + (self._target_lng - self._start_lng) * progress
+        lat = self._start_lat + (self._target_lat - self._start_lat) * progress
+        zoom = self._start_zoom + (self._target_zoom - self._start_zoom) * progress
+        px, py = MercatorProjection.lnglat_to_pixel(lng, lat, zoom)
         if self._callback:
             self._callback(px, py, zoom)
 

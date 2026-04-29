@@ -133,6 +133,7 @@ class _MapCanvas(QWidget):
 
         self._animator = MapViewAnimator(self)
         self._animator.set_callback(self._on_anim_frame)
+        self._animator.finished.connect(self._invalidate_paths)
 
         # ── 聚类 ──
         self._clusterer = GridClusterer(cell_px=50)
@@ -249,7 +250,8 @@ class _MapCanvas(QWidget):
         self._center_px = px
         self._center_py = py
         self._zoom = zoom
-        self._invalidate_paths()
+        # 动画期间不复建路径，依靠 paintEvent 中的 scale 补偿；
+        # finished 信号已连接 _invalidate_paths，动画结束后自动重建精确路径。
         self._update_label_opacity_target()
         self.update()
 
@@ -262,7 +264,9 @@ class _MapCanvas(QWidget):
         self._cached_zoom = -1.0
 
     def _get_province_paths(self) -> dict[str, QPainterPath]:
-        if abs(self._cached_zoom - self._zoom) > 0.001 or not self._province_paths:
+        # 只在路径为空时重建；zoom 变化期间依靠 paintEvent 的 scale 补偿，
+        # 避免动画/连续缩放时每帧重建带来的巨大开销。
+        if not self._province_paths:
             self._province_paths.clear()
             for name, geom in self._province_geoms.items():
                 self._province_paths[name] = self._build_mercator_path(geom, self._zoom)
@@ -367,18 +371,28 @@ class _MapCanvas(QWidget):
 
         # 中层与上层共享同一视口平移变换
         p.save()
-        p.translate(self.width() / 2.0 - self._center_px,
-                    self.height() / 2.0 - self._center_py)
-
         paths = self._get_province_paths()
         pen_w = 0.5  # 像素单位
+
+        # 若路径缓存 zoom 与当前 zoom 不一致（动画/连续缩放期间），
+        # 使用 painter scale 补偿，避免每帧重建 QPainterPath。
+        if paths and abs(self._cached_zoom - self._zoom) > 0.001:
+            scale = 2.0 ** (self._zoom - self._cached_zoom)
+            p.translate(self.width() / 2.0, self.height() / 2.0)
+            p.scale(scale, scale)
+            p.translate(-self._center_px / scale, -self._center_py / scale)
+        else:
+            p.translate(self.width() / 2.0 - self._center_px,
+                        self.height() / 2.0 - self._center_py)
 
         # ── Layer 2a: 填充 + 普通边框 ──
         for name, path in paths.items():
             color = self._province_colors.get(name, _DEFAULT_FILL)
             p.fillPath(path, QBrush(color))
             if name != self._hovered:
-                p.setPen(QPen(_BORDER_COLOR, pen_w))
+                pen = QPen(_BORDER_COLOR, pen_w)
+                pen.setCosmetic(True)
+                p.setPen(pen)
                 p.drawPath(path)
 
         # ── Layer 2b: 悬停发光 (最上层防止被邻省遮挡) ──
@@ -387,11 +401,13 @@ class _MapCanvas(QWidget):
                 if name == self._hovered:
                     glow_pen = QPen(_HOVER_GLOW, pen_w * 10)
                     glow_pen.setJoinStyle(Qt.RoundJoin)
+                    glow_pen.setCosmetic(True)
                     p.setPen(glow_pen)
                     p.drawPath(path)
 
                     h_pen = QPen(_HOVER_BORDER, pen_w * 4)
                     h_pen.setJoinStyle(Qt.RoundJoin)
+                    h_pen.setCosmetic(True)
                     p.setPen(h_pen)
                     p.drawPath(path)
                     break
