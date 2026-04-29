@@ -83,8 +83,8 @@ class MainWindow(QMainWindow):
 
         # ── 左侧 Sidebar ──
         self._sidebar = QTabWidget()
-        self._sidebar.setMinimumWidth(280)
-        self._sidebar.setMaximumWidth(420)
+        self._sidebar.setMinimumWidth(260)
+        self._sidebar.setMaximumWidth(400)
 
         # Tab 0: 省份概览列表
         self._province_list = ProvinceListPanel()
@@ -102,8 +102,9 @@ class MainWindow(QMainWindow):
         self._splitter = QSplitter(Qt.Horizontal)
         self._splitter.addWidget(self._sidebar)
         self._splitter.addWidget(self._map_view)
-        self._splitter.setSizes([340, 1260])
+        self._splitter.setSizes([300, 1300])
         self._splitter.setStretchFactor(1, 1)
+        self._splitter.setHandleWidth(0)
         self.setCentralWidget(self._splitter)
 
         # 状态栏

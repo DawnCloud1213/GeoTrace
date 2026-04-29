@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 200
 # 侧边栏模式下使用紧凑缩略图 (128×96 确保 320px 宽 sidebar 能容下两列)
 THUMBNAIL_SIZE = QSize(128, 96)
-GRID_SPACING = QSize(THUMBNAIL_SIZE.width() + 12, THUMBNAIL_SIZE.height() + 34)
+GRID_SPACING = QSize(THUMBNAIL_SIZE.width() + 4, THUMBNAIL_SIZE.height() + 30)
 
 
 class PhotoListModel(QAbstractListModel):
@@ -313,7 +313,7 @@ class PhotoGrid(QWidget):
         self._list_view.setWrapping(True)
         self._list_view.setBatchSize(30)
         self._list_view.setUniformItemSizes(True)
-        self._list_view.setSpacing(8)
+        self._list_view.setSpacing(6)
         self._list_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._list_view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self._list_view.verticalScrollBar().setSingleStep(40)

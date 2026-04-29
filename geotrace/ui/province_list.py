@@ -25,7 +25,6 @@ class ProvinceListPanel(QFrame):
         self._stats: list[dict] = []
         self.setObjectName("floatingPanel")
         self.setMinimumWidth(170)
-        self.setMaximumWidth(220)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 10)

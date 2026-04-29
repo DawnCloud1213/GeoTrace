@@ -54,8 +54,8 @@ _HOVER_GLOW = QColor(0xFF, 0x70, 0x43, 40)
 # 大陆主体 WGS84 范围 (用于初始视图)
 _MAINLAND_BOUNDS = (73.5, 18.0, 135.1, 53.6)
 
-# 标签显隐 zoom 阈值
-_LABEL_ZOOM_THRESHOLD = 6.0
+# 标签显隐 zoom 阈值 (全国初始视图 zoom 约 4, 需在此以下即可显示)
+_LABEL_ZOOM_THRESHOLD = 3.5
 
 
 def _heat_color(value: int, max_val: int) -> QColor:
@@ -396,10 +396,10 @@ class _MapCanvas(QWidget):
                     p.drawPath(path)
                     break
 
-        # ── Layer 2c: 省份标签 ──
-        self._paint_labels(p)
-
         p.restore()
+
+        # ── Layer 2c: 省份标签 (屏幕坐标系, 不走场景变换) ──
+        self._paint_labels(p)
 
         # ── Layer 3: 聚类顶层 (屏幕坐标系, 不走场景变换) ──
         if self._photo_coords:
