@@ -366,7 +366,7 @@ def panel_shadow_effect():
     shadow.setBlurRadius(Metrics.SHADOW_BLUR)
     shadow.setXOffset(Metrics.SHADOW_OFFSET[0])
     shadow.setYOffset(Metrics.SHADOW_OFFSET[1])
-    shadow.setColor(QColor(0, 0, 0, 40))
+    shadow.setColor(QColor(80, 50, 20, 40))
     return shadow
 
 
@@ -377,5 +377,5 @@ def card_shadow_effect():
     shadow.setBlurRadius(8)
     shadow.setXOffset(0)
     shadow.setYOffset(1)
-    shadow.setColor(QColor(0, 0, 0, 30))
+    shadow.setColor(QColor(80, 50, 20, 30))
     return shadow

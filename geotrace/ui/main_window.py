@@ -130,9 +130,6 @@ class MainWindow(QMainWindow):
         # 刷新状态
         self._refresh_stats()
 
-        # 加载所有照片坐标供地图聚类
-        self._load_all_photo_coords()
-
     # ------------------------------------------------------------------
     # 初始化
     # ------------------------------------------------------------------
@@ -206,11 +203,14 @@ class MainWindow(QMainWindow):
         bridge = self._map_view.bridge
 
         bridge.mapReady.connect(self._on_map_ready)
-        bridge.provinceClicked.connect(self._on_province_clicked)
+        bridge.provinceClicked.connect(self._enter_province_view)
         bridge.unclassifiedClicked.connect(self._on_unclassified_clicked)
 
         # 照片网格双击打开大图
         self._photo_grid.photoDoubleClicked.connect(self._on_photo_double_clicked)
+
+        # 照片网格返回全国视图
+        self._photo_grid.returnToMap.connect(self._exit_province_view)
 
         # 地图浮动按钮
         self._map_view.toggleProvinceList.connect(self._toggle_sidebar)
@@ -218,7 +218,10 @@ class MainWindow(QMainWindow):
         self._settings_panel.closeRequested.connect(self._settings_panel.hide)
 
         # 省份列表点击
-        self._province_list.provinceClicked.connect(self._on_province_clicked)
+        self._province_list.provinceClicked.connect(self._enter_province_view)
+
+        # 地图返回按钮
+        self._map_view.backToNational.connect(self._exit_province_view)
 
         # 设置操作
         self._settings_panel.addDirectory.connect(self._on_add_directory)
@@ -316,15 +319,29 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     @Slot(str)
-    def _on_province_clicked(self, province_name: str) -> None:
-        """处理省份点击/选中: 地图飞行 + 侧边栏照片 Tab 加载."""
+    def _enter_province_view(self, province_name: str) -> None:
+        """进入省份放大视图: 地图飞行 + 加载缩略图标记 + 侧边栏照片 Tab."""
         if not province_name:
             return
-        logger.info("选中省份: %s", province_name)
+        logger.info("进入省份视图: %s", province_name)
         self._settings_panel.hide()
-        self._map_view.highlight(province_name)
+        photos = self._db.get_photo_coords(province_name)
+        self._map_view.enter_province_view(province_name, photos)
         self._photo_grid.load_province(province_name)
         self._sidebar.setCurrentIndex(1)
+        # 自动展开 sidebar 如果处于折叠状态
+        sizes = self._splitter.sizes()
+        if sizes[0] == 0:
+            w = getattr(self, '_sidebar_last_width', 320)
+            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
+
+    @Slot()
+    def _exit_province_view(self) -> None:
+        """返回全国地图视图: sidebar 切回省份列表."""
+        logger.info("返回全国视图")
+        self._settings_panel.hide()
+        self._map_view.exit_province_view()
+        self._sidebar.setCurrentIndex(0)
         # 自动展开 sidebar 如果处于折叠状态
         sizes = self._splitter.sizes()
         if sizes[0] == 0:
@@ -379,13 +396,17 @@ class MainWindow(QMainWindow):
         total = self._db.get_total_photo_count()
         self._photo_count_label.setText(f"照片总数: {total}")
 
-    def _load_all_photo_coords(self) -> None:
-        """加载所有带坐标照片供地图聚类渲染."""
-        try:
-            photos = self._db.get_photo_coords()
-            self._map_view.set_photo_coords(photos)
-        except Exception as e:
-            logger.warning("加载照片坐标失败: %s", e)
+    def _refresh_map_photos(self) -> None:
+        """根据当前视图模式刷新地图上的照片标记."""
+        current = self._map_view._canvas._current_province
+        if current:
+            try:
+                photos = self._db.get_photo_coords(current)
+                self._map_view.set_photo_coords(photos)
+            except Exception as e:
+                logger.warning("加载省份照片坐标失败: %s", e)
+        else:
+            self._map_view.set_photo_coords([])
 
     # ------------------------------------------------------------------
     # 菜单动作
@@ -418,7 +439,7 @@ class MainWindow(QMainWindow):
         self._db.remove_directory(path)
         self._init_settings_panel()
         self._refresh_stats()
-        self._load_all_photo_coords()
+        self._refresh_map_photos()
 
     def _on_rescan_all(self) -> None:
         """重新扫描所有已注册目录."""
@@ -497,7 +518,7 @@ class MainWindow(QMainWindow):
         self._settings_panel.hide_progress()
         self._init_settings_panel()
         self._refresh_stats()
-        self._load_all_photo_coords()
+        self._refresh_map_photos()
 
     @Slot(str)
     def _on_scan_error(self, message: str) -> None:

@@ -26,6 +26,7 @@ from PySide6.QtGui import (
 )
 
 from geotrace.ui.map_core import MercatorProjection
+from geotrace.ui.theme import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,9 @@ SINGLE_ANCHOR_BG = QColor(230, 126, 34)
 SINGLE_ANCHOR_BORDER = QColor(255, 255, 255)
 SINGLE_SIZE = 24  # 单个锚点直径 (像素)
 BADGE_MIN_RADIUS = 14
+THUMBNAIL_SIZE = 44  # 缩略图模式下标记尺寸
+THUMBNAIL_RADIUS = 6  # 缩略图圆角
+SHADOW_COLOR = QColor(80, 50, 20, 40)  # 暖棕阴影
 
 
 @dataclass(frozen=True)
@@ -49,7 +53,8 @@ class ClusterItem:
     screen_y: float
     count: int
     ids: list[int]
-    thumbnail_path: str | None = None  # count == 1 时使用
+    thumbnail_path: str | None = None
+    file_path: str | None = None
 
 
 class GridClusterer:
@@ -120,6 +125,7 @@ class GridClusterer:
                     "sy": sy,
                     "id": p.get("id", 0),
                     "thumbnail_path": p.get("thumbnail_path"),
+                    "file_path": p.get("file_path"),
                 })
 
             result: list[ClusterItem] = []
@@ -128,8 +134,9 @@ class GridClusterer:
                 avg_sx = sum(it["sx"] for it in items) / count
                 avg_sy = sum(it["sy"] for it in items) / count
                 ids = [it["id"] for it in items]
-                thumb = items[0]["thumbnail_path"] if count == 1 else None
-                result.append(ClusterItem(avg_sx, avg_sy, count, ids, thumb))
+                thumb = items[0]["thumbnail_path"]
+                fpath = items[0]["file_path"]
+                result.append(ClusterItem(avg_sx, avg_sy, count, ids, thumb, fpath))
 
             if len(result) <= MAX_ELEMENTS:
                 return result
@@ -143,9 +150,15 @@ class GridClusterer:
 class ClusterRenderer:
     """负责在 QPainter 上绘制 ClusterItem 列表."""
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "badge") -> None:
+        self._mode = mode
         self._badge_font = QFont('"Microsoft YaHei UI", "Segoe UI", "SimSun"', 9)
         self._badge_font.setBold(True)
+        self._thumb_font = QFont('"Microsoft YaHei UI", "Segoe UI", "SimSun"', 8)
+        self._thumb_font.setBold(True)
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode
 
     def paint(self, painter: QPainter, clusters: list[ClusterItem]) -> None:
         """绘制所有聚类元素."""
@@ -153,7 +166,9 @@ class ClusterRenderer:
         painter.setRenderHint(QPainter.Antialiasing)
 
         for cluster in clusters:
-            if cluster.count > 1:
+            if self._mode == "thumbnail":
+                self._paint_thumbnail_cluster(painter, cluster)
+            elif cluster.count > 1:
                 self._paint_badge(painter, cluster)
             else:
                 self._paint_single(painter, cluster)
@@ -169,7 +184,7 @@ class ClusterRenderer:
         # 阴影
         shadow_rect = QRectF(x + 1, y + 2, radius * 2, radius * 2)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(0, 0, 0, 40)))
+        painter.setBrush(QBrush(SHADOW_COLOR))
         painter.drawEllipse(shadow_rect)
 
         # 主体
@@ -190,11 +205,12 @@ class ClusterRenderer:
         x = cluster.screen_x - size / 2.0
         y = cluster.screen_y - size / 2.0
 
-        # 尝试加载缩略图
+        # 尝试加载缩略图 (优先使用 file_path 作为缓存 key 以复用 PhotoGrid 缓存)
         pixmap: QPixmap | None = None
-        if cluster.thumbnail_path:
+        cache_key = cluster.file_path or cluster.thumbnail_path
+        if cache_key:
             cached = QPixmap()
-            if QPixmapCache.find(cluster.thumbnail_path, cached):
+            if QPixmapCache.find(cache_key, cached):
                 pixmap = cached.scaled(QSize(size, size), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             else:
                 # 异步不在此处处理; 若未缓存则先画纯色圆点
@@ -216,6 +232,65 @@ class ClusterRenderer:
         painter.setPen(QPen(SINGLE_ANCHOR_BORDER, 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(QRectF(x, y, size, size))
+
+    def _paint_thumbnail_cluster(self, painter: QPainter, cluster: ClusterItem) -> None:
+        """绘制缩略图模式标记 (圆角矩形缩略图 + 可选数字角标)."""
+        size = THUMBNAIL_SIZE
+        x = cluster.screen_x - size / 2.0
+        y = cluster.screen_y - size / 2.0
+
+        # 阴影
+        shadow_rect = QRectF(x + 1, y + 2, size, size)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(SHADOW_COLOR))
+        painter.drawRoundedRect(shadow_rect, THUMBNAIL_RADIUS, THUMBNAIL_RADIUS)
+
+        rect = QRectF(x, y, size, size)
+
+        # 尝试加载缩略图 (优先使用 file_path 作为缓存 key 以复用 PhotoGrid 缓存)
+        pixmap: QPixmap | None = None
+        cache_key = cluster.file_path or cluster.thumbnail_path
+        if cache_key:
+            cached = QPixmap()
+            if QPixmapCache.find(cache_key, cached):
+                pixmap = cached.scaled(
+                    QSize(size, size),
+                    Qt.KeepAspectRatioByExpanding,
+                    Qt.SmoothTransformation,
+                )
+
+        if pixmap and not pixmap.isNull():
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, THUMBNAIL_RADIUS, THUMBNAIL_RADIUS)
+            painter.setClipPath(clip)
+            painter.drawPixmap(rect.toRect(), pixmap)
+            painter.setClipping(False)
+        else:
+            # 无缓存时绘制醒目占位块
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(Colors.ACCENT_PRIMARY)))
+            painter.drawRoundedRect(rect, THUMBNAIL_RADIUS, THUMBNAIL_RADIUS)
+
+        # 边框
+        painter.setPen(QPen(QColor(Colors.BORDER_MEDIUM), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect, THUMBNAIL_RADIUS, THUMBNAIL_RADIUS)
+
+        # 数字角标 (count > 1)
+        if cluster.count > 1:
+            badge_r = 8
+            badge_x = x + size - badge_r * 2
+            badge_y = y + size - badge_r * 2
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(Colors.ACCENT_PRIMARY)))
+            painter.drawEllipse(QRectF(badge_x, badge_y, badge_r * 2, badge_r * 2))
+            painter.setPen(QColor(Colors.TEXT_ON_ACCENT))
+            painter.setFont(self._thumb_font)
+            painter.drawText(
+                QRectF(badge_x, badge_y, badge_r * 2, badge_r * 2),
+                Qt.AlignCenter,
+                str(cluster.count),
+            )
 
 
 import math  # noqa: E402 放在文件尾部避免循环导入不影响实际运行

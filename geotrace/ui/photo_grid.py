@@ -194,7 +194,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
         card_rect = option.rect.adjusted(card_margin, card_margin, -card_margin, -card_margin)
 
         # 卡片投影
-        shadow_color = QColor(0, 0, 0, 25)
+        shadow_color = QColor(128, 100, 70, 30)
         shadow_rect = card_rect.translated(0, 2)
         painter.setPen(Qt.NoPen)
         painter.setBrush(shadow_color)

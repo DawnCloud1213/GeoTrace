@@ -136,8 +136,12 @@ class _MapCanvas(QWidget):
 
         # ── 聚类 ──
         self._clusterer = GridClusterer(cell_px=50)
-        self._cluster_renderer = ClusterRenderer()
+        self._cluster_renderer = ClusterRenderer(mode="badge")
         self._photo_coords: list[dict] = []  # 当前渲染的照片坐标集
+
+        # ── 视图模式 ──
+        self._view_mode: str = "national"  # "national" | "province"
+        self._current_province: str | None = None
 
         # ── 鼠标 ──
         self._press_pos: QPointF | None = None
@@ -534,19 +538,6 @@ class _MapCanvas(QWidget):
                                 self.setCursor(Qt.OpenHandCursor)
                                 return
 
-                # 再检测省份点击
-                mpx = self._center_px + (mx - self.width() / 2.0)
-                mpy = self._center_py + (my - self.height() / 2.0)
-                lng, lat = MercatorProjection.pixel_to_lnglat(mpx, mpy, self._zoom)
-                point = Point(lng, lat)
-                for name, geom in self._province_geoms.items():
-                    try:
-                        if geom.contains(point) or point.within(geom):
-                            self.provinceClicked.emit(name)
-                            break
-                    except Exception:
-                        continue
-
             self._press_pos = None
             self._dragging = False
             self.setCursor(Qt.OpenHandCursor)
@@ -590,6 +581,50 @@ class _MapCanvas(QWidget):
             self.hoveredChanged.emit(hit)
             self.update()
 
+    # ------------------------------------------------------------------
+    # 视图模式
+    # ------------------------------------------------------------------
+
+    def set_cluster_mode(self, mode: str) -> None:
+        self._cluster_renderer.set_mode(mode)
+        self.update()
+
+    def enter_province_view(self, province_name: str, photos: list[dict]) -> None:
+        self._view_mode = "province"
+        self._current_province = province_name
+        self._clusterer.cell_px = 30  # 省份视图下更小聚合粒度
+        self.set_cluster_mode("thumbnail")
+        self.set_photo_coords(photos)
+        self.highlight(province_name)
+
+    def exit_province_view(self) -> None:
+        self._view_mode = "national"
+        self._current_province = None
+        self._clusterer.cell_px = 50  # 恢复默认
+        self.set_cluster_mode("badge")
+        self._photo_coords = []
+        self._compute_initial_view()
+        self.update()
+
+    # ------------------------------------------------------------------
+    # 双击事件
+    # ------------------------------------------------------------------
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            mx, my = event.position().x(), event.position().y()
+            mpx = self._center_px + (mx - self.width() / 2.0)
+            mpy = self._center_py + (my - self.height() / 2.0)
+            lng, lat = MercatorProjection.pixel_to_lnglat(mpx, mpy, self._zoom)
+            point = Point(lng, lat)
+            for name, geom in self._province_geoms.items():
+                try:
+                    if geom.contains(point) or point.within(geom):
+                        self.provinceClicked.emit(name)
+                        break
+                except Exception:
+                    continue
+
 
 # 复用 marker_cluster 常量
 from geotrace.ui.marker_cluster import SINGLE_SIZE  # noqa: E402
@@ -601,6 +636,8 @@ class MapWidget(QWidget):
     toggleProvinceList = Signal()
     toggleSettings = Signal()
     clusterClicked = Signal(list)  # 透传 canvas 信号
+    provinceViewEntered = Signal(str)
+    backToNational = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -651,6 +688,15 @@ class MapWidget(QWidget):
         self._btn_style.setVisible(self._tile_manager.mbtiles_available)
         self._btn_style.clicked.connect(self._toggle_tile_style)
         self._tile_style = "tiles"  # "tiles" | "solid"
+
+        # 返回全国视图按钮 (仅在省份视图显示)
+        self._btn_back = QPushButton("←", self)
+        self._btn_back.setFixedSize(36, 36)
+        self._btn_back.setCursor(Qt.PointingHandCursor)
+        self._btn_back.setToolTip("返回全国视图")
+        self._btn_back.setProperty("cssClass", "mapOverlay")
+        self._btn_back.hide()
+        self._btn_back.clicked.connect(self._on_back_clicked)
 
         # 悬停提示
         self._hover_tooltip = QLabel(self)
@@ -722,11 +768,13 @@ class MapWidget(QWidget):
         self._btn_provinces.move(8, 8)
         self._btn_settings.move(self.width() - 44, 8)
         self._btn_style.move(self.width() - 44, 52)
+        self._btn_back.move(8, 52)
         self._hover_tooltip.move(50, self.height() - 50)
         self._legend.move(self.width() - 150, self.height() - 100)
         self._btn_provinces.raise_()
         self._btn_settings.raise_()
         self._btn_style.raise_()
+        self._btn_back.raise_()
         self._hover_tooltip.raise_()
         self._legend.raise_()
 
@@ -789,6 +837,19 @@ class MapWidget(QWidget):
 
     def highlight(self, province_name: str) -> None:
         self._canvas.highlight(province_name)
+
+    def enter_province_view(self, province_name: str, photos: list[dict]) -> None:
+        self._canvas.enter_province_view(province_name, photos)
+        self._btn_back.show()
+        self._btn_back.raise_()
+        self.provinceViewEntered.emit(province_name)
+
+    def exit_province_view(self) -> None:
+        self._canvas.exit_province_view()
+        self._btn_back.hide()
+
+    def _on_back_clicked(self) -> None:
+        self.backToNational.emit()
 
     # ------------------------------------------------------------------
     # 内部回调
