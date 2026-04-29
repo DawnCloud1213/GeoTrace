@@ -122,7 +122,7 @@ class PhotoViewer(QDialog):
         self._load_image()
 
     # ------------------------------------------------------------------
-    # 事件过滤器 — 左键拖拽平移
+    # 事件过滤器 — 左键拖拽平移 + 滚轮无级缩放
     # ------------------------------------------------------------------
 
     def eventFilter(self, obj, event) -> bool:
@@ -149,6 +149,10 @@ class PhotoViewer(QDialog):
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
             self._panning = False
             vp.setCursor(Qt.OpenHandCursor)
+            return True
+
+        if event.type() == QEvent.Wheel:
+            self._handle_wheel_zoom(event)
             return True
 
         return super().eventFilter(obj, event)
@@ -270,10 +274,10 @@ class PhotoViewer(QDialog):
         vb.setValue(max(0, min(vb.maximum(), int(cy * ratio - vp.height() / 2))))
 
     # ------------------------------------------------------------------
-    # 鼠标滚轮缩放
+    # 鼠标滚轮无级缩放 (供 eventFilter 调用)
     # ------------------------------------------------------------------
 
-    def wheelEvent(self, event) -> None:
+    def _handle_wheel_zoom(self, event) -> None:
         if self._pixmap is None:
             return
         dy = event.angleDelta().y()
@@ -281,7 +285,7 @@ class PhotoViewer(QDialog):
             return
 
         old = self._scale_factor
-        factor = 1.12 ** (dy / 120.0)
+        factor = 1.0008 ** dy
         self._scale_factor = max(0.05, min(20.0, self._scale_factor * factor))
 
         vp = self._scroll_area.viewport()
