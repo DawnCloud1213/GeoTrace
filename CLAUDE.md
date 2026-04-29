@@ -41,8 +41,8 @@ GeoTrace/
 │   │   ├── map_view.py            # 【已废弃】旧 QWebEngineView + ECharts 实现
 │   │   ├── bridge.py              # MapBridge: QObject Signal 集线器
 │   │   ├── theme.py               # 主题系统: Colors/Fonts/Metrics/GLOBAL_QSS/投影
-│   │   ├── photo_grid.py          # QListView 卡片式缩略图 + 分页 + 空状态
-│   │   ├── photo_viewer.py        # QDialog 大图查看 (EXIF 自动旋转 + 暖色背景)
+│   │   ├── photo_grid.py          # QListView 卡片式缩略图 + 异步分页 + 滚轮自动加载 + 空状态
+│   │   ├── photo_viewer.py        # QDialog 大图: 滚轮无级缩放 + 左键拖拽平移 + 毛玻璃浮动切换按钮
 │   │   ├── province_list.py       # 浮动省份列表面板
 │   │   ├── settings_panel.py      # 浮动设置面板 (目录管理 + 扫描)
 │   │   └── resources/
@@ -68,8 +68,16 @@ GeoTrace/
 
 用户点击地图省份 → _MapCanvas.provinceClicked(name) → MapWidget._on_province_clicked
   → bridge.provinceClicked.emit(name) → MainWindow._on_province_clicked
-  → PhotoGrid.load_province(name) → DatabaseManager.query_by_province(分页)
-  → QStackedWidget 切换到 PhotoGrid
+  → PhotoGrid.load_province(name) → PhotoQueryWorker(QThread) 异步查询
+  → QStackedWidget 淡入淡出切换到 PhotoGrid
+
+照片网格交互:
+  滚轮滚动至 50% 位置 → 自动加载下一页 (PAGE_SIZE=200)
+  双击照片 → PhotoViewer QDialog 大图查看
+    → 滚轮: 无级缩放 (1.0008 ** dy), 以鼠标位置为锚点
+    → 左键拖拽: 平移图片 (eventFilter 拦截 viewport, 调节 scrollbar)
+    → ◀ ▶ 浮动毛玻璃按钮 / 左右方向键: 切换上一张/下一张
+    → ESC: 关闭
 
 浮动面板:
   地图左上角 ☰ → ProvinceListPanel (按照片数排序的省份列表)
@@ -108,6 +116,25 @@ GeoTrace/
 - **视图切换**: QStackedWidget 交叉淡入淡出 (150ms, QGraphicsOpacityEffect)
 - **面板投影**: QGraphicsDropShadowEffect (与 geometry 动画不冲突)
 
+### 照片查看器 (photo_viewer.py)
+
+- **PhotoViewer (QDialog)**: 模态大图查看，1200×800 默认尺寸，暖色背景
+- **滚轮无级缩放**: 在 viewport 上通过 `eventFilter` 拦截 `QEvent.Wheel`，阻止 QScrollArea 默认滚动行为；缩放因子 `1.0008 ** dy` 实现连续无极调节，以鼠标位置为锚点
+- **左键拖拽平移**: `eventFilter` 拦截 viewport 的 MouseButtonPress/Move/Release，调整 scrollbar 值；光标切换 `OpenHandCursor` ↔ `ClosedHandCursor`
+- **浮动毛玻璃按钮**: `◀` `▶` 按钮作为 dialog 子 widget 绝对定位在左右两侧，`rgba(0,0,0,0.25)` + 半透明白边框模拟磨砂效果
+- **底部计数器**: `1 / 10` 格式，绝对定位在底部居中，同款毛玻璃风格
+- **快捷键**: `Ctrl+=/-` 缩放, `Ctrl+0` 适应窗口, `← →` 切换照片, `ESC` 关闭
+- **PIL → QPixmap**: 通过 `BytesIO` JPEG 字节流中转，自动应用 EXIF Orientation
+
+### 照片网格 (photo_grid.py)
+
+- **PhotoListModel (QAbstractListModel)**: 管理分页数据，`set_page_data()` 支持追加和替换模式
+- **PhotoQueryWorker (QObject + QThread)**: 异步 DB 查询，`finished` signal 回传结果，避免阻塞 UI
+- **ThumbnailDelegate (QStyledItemDelegate)**: 卡片式缩略图绘制，QPixmapCache 内存缓存 + QImageReader 磁盘加载
+- **自动加载**: 滚动至 50% 位置时自动加载下一页（PAGE_SIZE=200），无需手动点击"加载更多"
+- **滚动步长**: `verticalScrollBar().setSingleStep(40)` 确保滚轮滚动平滑可控
+- **省份切换**: 切换省份时清空 QPixmapCache，重置模型数据
+
 ### Bridge 模式 (bridge.py)
 
 - MapBridge 是纯 QObject Signal 集线器，不再依赖 QWebChannel
@@ -118,6 +145,7 @@ GeoTrace/
 
 - WAL 模式支持多线程并发读写
 - `province_stats` 表由 3 个触发器自动维护 (INSERT/UPDATE/DELETE)
+- 复合索引 `idx_photos_province_date(province_name, date_taken DESC)` 优化省份+日期查询
 - 每个 Worker 线程持有独立 `sqlite3.Connection` (通过 `threading.local()`)
 - 增量扫描：通过 `(file_path, file_mtime)` 幂等检查
 
