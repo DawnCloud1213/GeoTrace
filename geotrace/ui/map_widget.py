@@ -46,7 +46,7 @@ _HEAT_COLORS = [
 ]
 
 _BG_COLOR = QColor(0xFE, 0xF9, 0xF0)
-_DEFAULT_FILL = _HEAT_COLORS[0]
+_DEFAULT_FILL = QColor(0, 0, 0, 0)
 _BORDER_COLOR = QColor(200, 184, 152)
 _HOVER_BORDER = QColor(0xFF, 0x70, 0x43)
 _HOVER_GLOW = QColor(0xFF, 0x70, 0x43, 40)
@@ -62,6 +62,7 @@ def _heat_color(value: int, max_val: int) -> QColor:
     if max_val <= 0:
         return _DEFAULT_FILL
     t = min(value / max_val, 1.0)
+    alpha = int(t * 51)  # 最大 0.2 不透明度
     segments = len(_HEAT_COLORS) - 1
     idx = min(int(t * segments), segments - 1)
     local_t = (t * segments) - idx
@@ -70,6 +71,7 @@ def _heat_color(value: int, max_val: int) -> QColor:
         int(c0.red() + (c1.red() - c0.red()) * local_t),
         int(c0.green() + (c1.green() - c0.green()) * local_t),
         int(c0.blue() + (c1.blue() - c0.blue()) * local_t),
+        alpha,
     )
 
 
@@ -389,10 +391,9 @@ class _MapCanvas(QWidget):
             p.translate(self.width() / 2.0 - self._center_px,
                         self.height() / 2.0 - self._center_py)
 
-        # ── Layer 2a: 半透明填充 + 普通边框 ──
+        # ── Layer 2a: 填充 + 普通边框 ──
         for name, path in paths.items():
             color = QColor(self._province_colors.get(name, _DEFAULT_FILL))
-            color.setAlpha(128)
             p.fillPath(path, QBrush(color))
             if name != self._hovered:
                 pen = QPen(_BORDER_COLOR, pen_w)
@@ -404,8 +405,6 @@ class _MapCanvas(QWidget):
         if self._hovered:
             for name, path in paths.items():
                 if name == self._hovered:
-                    p.fillPath(path, QBrush(QColor(0xFF, 0x70, 0x43, 60)))
-
                     glow_pen = QPen(_HOVER_GLOW, pen_w * 10)
                     glow_pen.setJoinStyle(Qt.RoundJoin)
                     glow_pen.setCosmetic(True)

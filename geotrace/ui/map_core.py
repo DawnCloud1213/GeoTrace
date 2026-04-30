@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -45,8 +46,8 @@ TILE_SIZE: int = 256
 MAX_ZOOM: int = 18
 MIN_ZOOM: int = 3
 
-# 默认在线瓦片地址 (CartoDB light_all — 对桌面应用更友好，无严格 UA 拦截)
-_DEFAULT_TILE_URL = "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+# 默认在线瓦片地址：高德矢量中文简约地图
+_DEFAULT_TILE_URL = "https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
 
 
 class MercatorProjection:
@@ -180,7 +181,8 @@ class NetworkTileProvider(QObject):
             return
         self._pending.add((x, y, z))
 
-        url = QUrl(self._url_template.format(x=x, y=y, z=z))
+        subdomain = random.choice("1234")
+        url = QUrl(self._url_template.format(x=x, y=y, z=z, s=subdomain))
         req = QNetworkRequest(url)
         req.setHeader(
             QNetworkRequest.KnownHeaders.UserAgentHeader,

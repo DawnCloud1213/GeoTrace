@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Callable
 
 from PySide6.QtCore import (
@@ -34,7 +35,7 @@ class MapViewAnimator(QVariantAnimation):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.setDuration(600)
-        self.setEasingCurve(QEasingCurve.InOutQuart)
+        self.setEasingCurve(QEasingCurve.OutQuart)
         self.valueChanged.connect(self._on_value_changed)
 
         self._callback: Callable[[float, float, float], None] | None = None
@@ -78,6 +79,13 @@ class MapViewAnimator(QVariantAnimation):
         self._target_lng, self._target_lat = MercatorProjection.pixel_to_lnglat(
             target_center_px, target_center_py, target_zoom
         )
+
+        distance = math.sqrt(
+            (self._target_lng - self._start_lng) ** 2
+            + (self._target_lat - self._start_lat) ** 2
+        )
+        duration = min(1000, max(400, int(distance * 150)))
+        self.setDuration(duration)
 
         self.setStartValue(0.0)
         self.setEndValue(1.0)
