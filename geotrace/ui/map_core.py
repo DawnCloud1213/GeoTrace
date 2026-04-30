@@ -416,27 +416,39 @@ class TileManager(QObject):
         vh = viewport_rect.height()
         half_w = vw / 2.0
         half_h = vh / 2.0
-        scale = 2.0 ** zoom
 
-        min_px = center_px - half_w
-        max_px = center_px + half_w
-        min_py = center_py - half_h
-        max_py = center_py + half_h
+        z_int = int(zoom)
+        # 浮点 zoom 相对于整数瓦片层级的缩放补偿因子。
+        # 省份路径使用当前 zoom 的 Mercator 像素坐标，瓦片仅在整数层级存在，
+        # 因此需要将 z_int 层级的瓦片缩放到当前 zoom 的坐标尺度下才能对齐。
+        zoom_scale = 2.0 ** (zoom - z_int)
+        world_tiles = 1 << z_int
+        max_tile_index = world_tiles - 1
 
-        # 瓦片索引范围 ( clamp 到合法范围 )
-        max_tile_index = int(scale) - 1
+        # 将视口中心转换到 z_int 层级的像素坐标，用于瓦片索引计算
+        center_px_z = center_px / zoom_scale
+        center_py_z = center_py / zoom_scale
+
+        min_px = center_px_z - half_w / zoom_scale
+        max_px = center_px_z + half_w / zoom_scale
+        min_py = center_py_z - half_h / zoom_scale
+        max_py = center_py_z + half_h / zoom_scale
+
         min_tx = max(int(min_px // TILE_SIZE) - 1, 0)
         max_tx = min(int(max_px // TILE_SIZE) + 1, max_tile_index)
         min_ty = max(int(min_py // TILE_SIZE) - 1, 0)
         max_ty = min(int(max_py // TILE_SIZE) + 1, max_tile_index)
 
         painter.save()
-        painter.translate(-center_px + half_w, -center_py + half_h)
+        # 三层变换: 先以屏幕中心为原点，再按 zoom_scale 缩放瓦片，
+        # 最后平移使 z_int 层级的瓦片坐标与当前 zoom 的 Mercator 像素对齐。
+        painter.translate(half_w, half_h)
+        painter.scale(zoom_scale, zoom_scale)
+        painter.translate(-center_px_z, -center_py_z)
 
         has_any_tile = False
         for ty in range(min_ty, max_ty + 1):
             for tx in range(min_tx, max_tx + 1):
-                z_int = int(zoom)
                 key = self._cache_key(tx, ty, z_int)
                 cached = QPixmap()
                 if QPixmapCache.find(key, cached):
