@@ -32,7 +32,7 @@ from shapely.geometry import MultiPolygon, Point, Polygon, mapping, shape
 from geotrace.ui.bridge import MapBridge
 from geotrace.ui.map_animation import MapViewAnimator, compute_fit_zoom_and_center
 from geotrace.ui.map_core import MercatorProjection, TileManager, MAX_ZOOM, MIN_ZOOM
-from geotrace.ui.marker_cluster import ClusterRenderer, GridClusterer
+from geotrace.ui.marker_cluster import ClusterRenderer, GridClusterer, ThumbnailManager
 from geotrace.ui.theme import Colors
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,9 @@ class _MapCanvas(QWidget):
         self._cluster_renderer = ClusterRenderer(mode="badge")
         self._photo_coords: list[dict] = []  # 当前渲染的照片坐标集
 
+        # 缩略图异步加载完成后自动触发重绘
+        ThumbnailManager().thumbnailReady.connect(self.update)
+
         # ── 视图模式 ──
         self._view_mode: str = "national"  # "national" | "province"
         self._current_province: str | None = None
@@ -225,6 +228,7 @@ class _MapCanvas(QWidget):
     def set_photo_coords(self, photos: list[dict]) -> None:
         """设置当前应渲染聚类的照片坐标列表."""
         self._photo_coords = photos
+        self._clusterer.load_photos(photos)
         self.update()
 
     def highlight(self, name: str) -> None:
@@ -420,7 +424,7 @@ class _MapCanvas(QWidget):
         # ── Layer 3: 聚类顶层 (屏幕坐标系, 不走场景变换) ──
         if self._photo_coords:
             clusters = self._clusterer.cluster(
-                self._photo_coords, self._zoom,
+                self._zoom,
                 self.width(), self.height(),
                 self._center_px, self._center_py,
             )
@@ -533,7 +537,7 @@ class _MapCanvas(QWidget):
                 # 先检测聚类点击
                 if self._photo_coords:
                     clusters = self._clusterer.cluster(
-                        self._photo_coords, self._zoom,
+                        self._zoom,
                         self.width(), self.height(),
                         self._center_px, self._center_py,
                     )
@@ -619,6 +623,7 @@ class _MapCanvas(QWidget):
         self._clusterer.cell_px = 50  # 恢复默认
         self.set_cluster_mode("badge")
         self._photo_coords = []
+        self._clusterer.load_photos([])
         self._compute_initial_view()
         self.update()
 
@@ -674,8 +679,8 @@ class MapWidget(QWidget):
         if sat_path.exists():
             providers["satellite"] = str(sat_path)
         self._tile_manager = TileManager(
-            providers=providers if providers else None,
-            default_provider="standard",
+            mbtiles_providers=providers if providers else None,
+            enable_network=True,
             placeholder_color=_BG_COLOR,
             parent=self,
         )
@@ -893,16 +898,23 @@ class MapWidget(QWidget):
             self._hover_tooltip.setVisible(False)
 
     def _toggle_tile_style(self) -> None:
-        """在标准地图与卫星影像 MBTiles 之间切换."""
+        """在在线/标准/卫星底图之间循环切换."""
         if not self._tile_manager.can_switch:
             return
         next_key = self._tile_manager.cycle_provider()
         if next_key == "satellite":
             self._tile_manager._placeholder = QColor("#1A1A1A")
-            self._btn_style.setToolTip("切换底图 (当前: 卫星影像)")
         else:
             self._tile_manager._placeholder = _BG_COLOR
-            self._btn_style.setToolTip("切换底图 (当前: 标准地图)")
+        name_map = {
+            "online": "在线地图",
+            "satellite": "卫星影像",
+            "standard": "标准地图",
+            "placeholder": "无底图",
+        }
+        self._btn_style.setToolTip(
+            f"切换底图 (当前: {name_map.get(next_key, next_key)})"
+        )
         self.update()
 
     # ------------------------------------------------------------------

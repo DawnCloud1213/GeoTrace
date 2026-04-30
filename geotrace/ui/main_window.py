@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _exit_province_view(self) -> None:
-        """返回全国地图视图: sidebar 切回省份列表."""
+        """返回全国地图视图: sidebar 切回省份列表，清空照片聚类."""
         logger.info("返回全国视图")
         self._settings_panel.hide()
         self._map_view.exit_province_view()
