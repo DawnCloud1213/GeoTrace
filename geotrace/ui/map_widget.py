@@ -389,9 +389,10 @@ class _MapCanvas(QWidget):
             p.translate(self.width() / 2.0 - self._center_px,
                         self.height() / 2.0 - self._center_py)
 
-        # ── Layer 2a: 填充 + 普通边框 ──
+        # ── Layer 2a: 半透明填充 + 普通边框 ──
         for name, path in paths.items():
-            color = self._province_colors.get(name, _DEFAULT_FILL)
+            color = QColor(self._province_colors.get(name, _DEFAULT_FILL))
+            color.setAlpha(128)
             p.fillPath(path, QBrush(color))
             if name != self._hovered:
                 pen = QPen(_BORDER_COLOR, pen_w)
@@ -403,6 +404,8 @@ class _MapCanvas(QWidget):
         if self._hovered:
             for name, path in paths.items():
                 if name == self._hovered:
+                    p.fillPath(path, QBrush(QColor(0xFF, 0x70, 0x43, 60)))
+
                     glow_pen = QPen(_HOVER_GLOW, pen_w * 10)
                     glow_pen.setJoinStyle(Qt.RoundJoin)
                     glow_pen.setCosmetic(True)
