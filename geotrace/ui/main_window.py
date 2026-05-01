@@ -118,6 +118,8 @@ class MainWindow(QMainWindow):
         # 浮动设置面板 (parent=地图, 叠加在地图右上角)
         self._settings_panel = SettingsPanel(self._map_view)
         self._init_settings_panel()
+        self._settings_panel.set_frosted_alpha(0.85)
+        self._province_list.set_frosted_alpha(0.85)
 
         # 菜单栏
         self._setup_menus()
@@ -228,6 +230,12 @@ class MainWindow(QMainWindow):
         self._settings_panel.addDirectory.connect(self._on_add_directory)
         self._settings_panel.removeDirectory.connect(self._on_remove_directory)
         self._settings_panel.rescanRequested.connect(self._on_rescan_all)
+        self._settings_panel.thumbnailToggleChanged.connect(
+            self._on_thumbnail_toggle_changed
+        )
+        self._settings_panel.frostedAlphaChanged.connect(
+            self._on_frosted_alpha_changed
+        )
 
         # 聚类点击
         self._map_view.clusterClicked.connect(self._on_cluster_clicked)
@@ -348,6 +356,14 @@ class MainWindow(QMainWindow):
         if sizes[0] == 0:
             w = getattr(self, '_sidebar_last_width', 320)
             self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
+        # 若常驻缩略图开启，恢复全国缩略图
+        if self._map_view._canvas._force_thumbnail_mode:
+            try:
+                photos = self._db.get_photo_coords()
+                self._map_view.set_photo_coords(photos)
+                self._map_view._canvas.set_cluster_mode("thumbnail")
+            except Exception as e:
+                logger.warning("加载全国照片坐标失败: %s", e)
 
     @Slot()
     def _on_unclassified_clicked(self) -> None:
@@ -358,6 +374,30 @@ class MainWindow(QMainWindow):
         if sizes[0] == 0:
             w = getattr(self, '_sidebar_last_width', 320)
             self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
+
+    @Slot(bool)
+    def _on_thumbnail_toggle_changed(self, enabled: bool) -> None:
+        """全国视图缩略图常驻开关."""
+        self._map_view._canvas.set_force_thumbnail_mode(enabled)
+        if self._map_view._canvas._view_mode == "national":
+            if enabled:
+                try:
+                    photos = self._db.get_photo_coords()
+                    self._map_view.set_photo_coords(photos)
+                    self._map_view._canvas.set_cluster_mode("thumbnail")
+                except Exception as e:
+                    logger.warning("加载全国照片坐标失败: %s", e)
+            else:
+                self._map_view.set_photo_coords([])
+                self._map_view._canvas.set_cluster_mode("badge")
+
+    @Slot(int)
+    def _on_frosted_alpha_changed(self, value: int) -> None:
+        """毛玻璃透明度滑块调节."""
+        alpha = value / 100.0
+        self._map_view.set_frosted_alpha(alpha)
+        self._settings_panel.set_frosted_alpha(alpha)
+        self._province_list.set_frosted_alpha(alpha)
 
     @Slot(list)
     def _on_cluster_clicked(self, ids: list[int]) -> None:
@@ -406,6 +446,12 @@ class MainWindow(QMainWindow):
                 self._map_view.set_photo_coords(photos)
             except Exception as e:
                 logger.warning("加载省份照片坐标失败: %s", e)
+        elif self._map_view._canvas._force_thumbnail_mode:
+            try:
+                photos = self._db.get_photo_coords()
+                self._map_view.set_photo_coords(photos)
+            except Exception as e:
+                logger.warning("加载全国照片坐标失败: %s", e)
         else:
             self._map_view.set_photo_coords([])
 

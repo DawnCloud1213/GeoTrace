@@ -402,3 +402,9 @@ def card_shadow_effect():
     shadow.setYOffset(1)
     shadow.setColor(QColor(80, 50, 20, 30))
     return shadow
+
+
+def frosted_rgba(alpha: float) -> str:
+    """根据 0.0~1.0 alpha 生成白色 rgba 字符串."""
+    a = max(0.0, min(1.0, alpha))
+    return f"rgba(255,255,255,{a:.2f})"

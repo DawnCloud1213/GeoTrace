@@ -33,7 +33,7 @@ from geotrace.ui.bridge import MapBridge
 from geotrace.ui.map_animation import MapViewAnimator, compute_fit_zoom_and_center
 from geotrace.ui.map_core import MercatorProjection, TileManager, MAX_ZOOM, MIN_ZOOM
 from geotrace.ui.marker_cluster import ClusterRenderer, GridClusterer, ThumbnailManager
-from geotrace.ui.theme import Colors
+from geotrace.ui.theme import Colors, frosted_rgba, Metrics
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,7 @@ class _MapCanvas(QWidget):
         # ── 视图模式 ──
         self._view_mode: str = "national"  # "national" | "province"
         self._current_province: str | None = None
+        self._force_thumbnail_mode: bool = False
 
         # ── 鼠标 ──
         self._press_pos: QPointF | None = None
@@ -611,6 +612,9 @@ class _MapCanvas(QWidget):
         self._cluster_renderer.set_mode(mode)
         self.update()
 
+    def set_force_thumbnail_mode(self, enabled: bool) -> None:
+        self._force_thumbnail_mode = enabled
+
     def enter_province_view(self, province_name: str, photos: list[dict]) -> None:
         self._view_mode = "province"
         self._current_province = province_name
@@ -667,6 +671,7 @@ class MapWidget(QWidget):
         self._bridge = MapBridge()
         self._geo_json_loaded = False
         self._stats_max_val = 0
+        self._frosted_alpha: float = 0.85
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -747,6 +752,7 @@ class MapWidget(QWidget):
 
         # 色阶图例
         self._legend = self._create_legend()
+        self._update_overlay_styles()
 
     def _create_legend(self) -> QFrame:
         from geotrace.ui.theme import Fonts as F
@@ -814,6 +820,54 @@ class MapWidget(QWidget):
     @property
     def bridge(self) -> MapBridge:
         return self._bridge
+
+    def _update_overlay_styles(self) -> None:
+        """根据当前 frosted_alpha 刷新所有浮动元素样式."""
+        a = frosted_rgba(self._frosted_alpha)
+        a_hover = frosted_rgba(min(1.0, self._frosted_alpha + 0.10))
+
+        btn_ss = f"""
+            QPushButton {{
+                background: {a};
+                border: 1px solid {Colors.BORDER_MEDIUM};
+                border-radius: {Metrics.BORDER_RADIUS_SM}px;
+                font-size: 16px;
+                color: {Colors.TEXT_SECONDARY};
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background: {a_hover};
+                border-color: {Colors.ACCENT_PRIMARY};
+                color: {Colors.ACCENT_PRIMARY};
+            }}
+        """
+        for btn in (self._btn_provinces, self._btn_settings,
+                    self._btn_style, self._btn_back):
+            btn.setStyleSheet(btn_ss)
+
+        self._hover_tooltip.setStyleSheet(f"""
+            QLabel {{
+                background: {a};
+                border: 1px solid {Colors.BORDER_MEDIUM};
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 12px;
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+
+        self._legend.setStyleSheet(f"""
+            QFrame#mapLegend {{
+                background: {a};
+                border: 1px solid {Colors.BORDER_LIGHT};
+                border-radius: 6px;
+                padding: 8px;
+            }}
+        """)
+
+    def set_frosted_alpha(self, alpha: float) -> None:
+        self._frosted_alpha = max(0.0, min(1.0, alpha))
+        self._update_overlay_styles()
 
     # ------------------------------------------------------------------
     # 地图加载

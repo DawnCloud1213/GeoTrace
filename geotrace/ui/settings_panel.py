@@ -3,6 +3,7 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -11,10 +12,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSlider,
     QVBoxLayout,
 )
 
-from geotrace.ui.theme import Colors, Fonts
+from geotrace.ui.theme import Colors, Fonts, Metrics, frosted_rgba
 
 
 class SettingsPanel(QFrame):
@@ -24,6 +26,8 @@ class SettingsPanel(QFrame):
     removeDirectory = Signal(str)
     rescanRequested = Signal()
     closeRequested = Signal()
+    thumbnailToggleChanged = Signal(bool)
+    frostedAlphaChanged = Signal(int)  # 0-100
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -103,6 +107,44 @@ class SettingsPanel(QFrame):
         self._progress.setVisible(False)
         layout.addWidget(self._progress)
 
+        # ── 分隔 ──
+        sep2 = QLabel()
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet(f"background: {Colors.BORDER_LIGHT};")
+        layout.addWidget(sep2)
+
+        # ── 显示效果 ──
+        fx_label = QLabel("显示效果")
+        fx_label.setFont(Fonts.title(10))
+        layout.addWidget(fx_label)
+
+        self._thumb_check = QCheckBox("全国视图显示缩略图")
+        self._thumb_check.stateChanged.connect(
+            lambda state: self.thumbnailToggleChanged.emit(state == Qt.Checked)
+        )
+        layout.addWidget(self._thumb_check)
+
+        # 透明度滑块
+        slider_row = QHBoxLayout()
+        slider_row.addWidget(QLabel("面板透明度"))
+
+        self._alpha_slider = QSlider(Qt.Horizontal)
+        self._alpha_slider.setRange(20, 100)
+        self._alpha_slider.setValue(85)
+        self._alpha_slider.setTickPosition(QSlider.TicksBelow)
+        self._alpha_slider.setTickInterval(10)
+        self._alpha_slider.valueChanged.connect(self.frostedAlphaChanged.emit)
+        slider_row.addWidget(self._alpha_slider)
+
+        self._alpha_value_label = QLabel("85%")
+        self._alpha_value_label.setFixedWidth(36)
+        self._alpha_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._alpha_slider.valueChanged.connect(
+            lambda v: self._alpha_value_label.setText(f"{v}%")
+        )
+        slider_row.addWidget(self._alpha_value_label)
+        layout.addLayout(slider_row)
+
         layout.addStretch()
         self.hide()
 
@@ -124,6 +166,17 @@ class SettingsPanel(QFrame):
 
     def hide_progress(self) -> None:
         self._progress.setVisible(False)
+
+    def set_frosted_alpha(self, alpha: float) -> None:
+        """动态刷新面板自身背景（用于滑块调节时实时预览）."""
+        bg = frosted_rgba(alpha)
+        self.setStyleSheet(f"""
+            QFrame#floatingPanel {{
+                background: {bg};
+                border: 1px solid {Colors.BORDER_LIGHT};
+                border-radius: {Metrics.BORDER_RADIUS_MD}px;
+            }}
+        """)
 
     # ------------------------------------------------------------------
     # 内部回调

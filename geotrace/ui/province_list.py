@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from geotrace.ui.theme import Colors, Fonts
+from geotrace.ui.theme import Colors, Fonts, frosted_rgba, Metrics
 
 
 class ProvinceListPanel(QFrame):
@@ -83,6 +83,16 @@ class ProvinceListPanel(QFrame):
             item = QListWidgetItem(f"{name}  ({value})")
             item.setData(Qt.UserRole, name)
             self._list.addItem(item)
+
+    def set_frosted_alpha(self, alpha: float) -> None:
+        bg = frosted_rgba(alpha)
+        self.setStyleSheet(f"""
+            QFrame#floatingPanel {{
+                background: {bg};
+                border: 1px solid {Colors.BORDER_LIGHT};
+                border-radius: {Metrics.BORDER_RADIUS_MD}px;
+            }}
+        """)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         name = item.data(Qt.UserRole)
