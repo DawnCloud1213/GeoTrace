@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRectF, QSize, Qt, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QRectF, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -74,7 +74,7 @@ class AsyncImageLoaderSignals(QObject):
     failed = Signal(str, str)     # cache_key, error_msg
 
 
-class ImageLoadTask(QThreadPool):
+class ImageLoadTask(QRunnable):
     """后台 QImage 加载任务 (QRunnable).
 
     在子线程中读取磁盘文件并解码为 QImage，完成后通过 Signal 回传主线程.
@@ -152,6 +152,9 @@ class ThumbnailManager(QObject):
         self._thread_pool = QThreadPool()
         self._thread_pool.setMaxThreadCount(4)
 
+        # 提升缓存容量，避免大体积/多数量照片挤爆缓存 (单位: KB)
+        QPixmapCache.setCacheLimit(50 * 1024)
+
         self._signals = AsyncImageLoaderSignals()
         self._signals.loaded.connect(self._on_loaded)
         self._signals.failed.connect(self._on_failed)
@@ -209,14 +212,15 @@ class ThumbnailManager(QObject):
             pixmap = QPixmap.fromImage(image)
             if pixmap.isNull():
                 return
-            QPixmapCache.insert(cache_key, pixmap)
+            if not QPixmapCache.insert(cache_key, pixmap):
+                logger.warning("QPixmapCache 插入失败 (缓存已满?): %s", cache_key)
             self.thumbnailReady.emit(cache_key)
         except Exception as e:
             logger.warning("缩略图 QPixmap 转换失败 %s: %s", cache_key, e)
 
     def _on_failed(self, cache_key: str, error: str) -> None:
         self._pending.discard(cache_key)
-        logger.debug("缩略图加载失败 %s: %s", cache_key, error)
+        logger.warning("缩略图加载失败 %s: %s", cache_key, error)
 
 
 # ------------------------------------------------------------------------------
@@ -242,29 +246,43 @@ class GridClusterer:
         Args:
             photos: 包含 id, latitude, longitude, thumbnail_path, file_path 的 dict 列表.
         """
-        try:
-            from rtree import index
-        except ImportError:
-            logger.error("rtree 未安装，无法构建空间索引")
-            self._rtree = None
-            self._photo_map = {}
-            return
+        logger.info("load_photos: 收到 %d 张照片", len(photos))
 
+        # 始终填充 _photo_map (供 _cluster_fallback 降级使用)
         self._photo_map = {}
-        # rtree.Index() 创建内存索引
-        rtree_idx = index.Index()
+        skipped = 0
         for p in photos:
             photo_id = p.get("id")
             lat = p.get("latitude")
             lng = p.get("longitude")
             if photo_id is None or lat is None or lng is None:
+                skipped += 1
                 continue
-            # 点数据的 BBox: (lng, lat, lng, lat)
-            rtree_idx.insert(photo_id, (lng, lat, lng, lat))
             self._photo_map[photo_id] = p
 
+        # 尝试构建 R-Tree 索引
+        try:
+            from rtree import index
+        except ImportError:
+            logger.warning("rtree 未安装，使用降级全量遍历聚类模式")
+            self._rtree = None
+            logger.info("_photo_map 已填充: %d 张照片 (跳过 %d 张), 使用 fallback 聚类",
+                        len(self._photo_map), skipped)
+            return
+
+        rtree_idx = index.Index()
+        rtree_skipped = 0
+        for photo_id, p in self._photo_map.items():
+            lng = p.get("longitude")
+            lat = p.get("latitude")
+            try:
+                rtree_idx.insert(photo_id, (lng, lat, lng, lat))
+            except Exception:
+                rtree_skipped += 1
+
         self._rtree = rtree_idx
-        logger.debug("R-Tree 索引已重建: %d 张照片", len(self._photo_map))
+        logger.info("R-Tree 索引已重建: %d 张照片 (跳过 %d, rtree跳过 %d)",
+                    len(self._photo_map), skipped, rtree_skipped)
 
     def cluster(
         self,
@@ -313,7 +331,9 @@ class GridClusterer:
             logger.warning("R-Tree intersection 失败: %s", e)
             return []
 
+        logger.info("cluster: bbox=%s, visible_ids=%d", bbox, len(visible_ids))
         if not visible_ids:
+            logger.warning("cluster: 视口内无照片 (center_px=%s, center_py=%s, zoom=%s, viewport=%sx%s)", center_px, center_py, zoom, viewport_width, viewport_height)
             return []
 
         # 仅对可视范围内照片执行屏幕网格聚类
@@ -583,8 +603,14 @@ class ClusterRenderer:
     def _get_cached_pixmap(
         self, cluster: ClusterItem, target_size: int
     ) -> QPixmap | None:
-        """优先读 QPixmapCache，未命中则发起异步加载请求."""
-        cache_key = cluster.file_path or cluster.thumbnail_path
+        """优先读 QPixmapCache，未命中则发起异步加载请求.
+
+        加载源优先级: thumbnail_path (已生成的小图) > file_path (原始大图).
+        避免直接读取 RAW 或大体积原图导致 QImageReader 失败或卡顿.
+        """
+        # 优先使用 thumbnail_path 作为缓存键和加载源
+        source_path = cluster.thumbnail_path or cluster.file_path
+        cache_key = source_path
         if not cache_key:
             return None
 
@@ -601,7 +627,7 @@ class ClusterRenderer:
 
         # 未命中: 发起后台加载 (幂等)
         self._thumb_manager.request_thumbnail(
-            cache_key, cluster.file_path or cluster.thumbnail_path, QSize(target_size, target_size)
+            cache_key, source_path, QSize(target_size, target_size)
         )
         return None
 

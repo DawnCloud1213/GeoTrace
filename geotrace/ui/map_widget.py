@@ -47,7 +47,6 @@ _HEAT_COLORS = [
 
 _BG_COLOR = QColor(0xFE, 0xF9, 0xF0)
 _DEFAULT_FILL = QColor(0, 0, 0, 0)
-_BORDER_COLOR = QColor(200, 184, 152)
 _HOVER_BORDER = QColor(0xFF, 0x70, 0x43)
 _HOVER_GLOW = QColor(0xFF, 0x70, 0x43, 40)
 
@@ -232,6 +231,7 @@ class _MapCanvas(QWidget):
         """设置当前应渲染聚类的照片坐标列表."""
         self._photo_coords = photos
         self._clusterer.load_photos(photos)
+        logger.info("set_photo_coords: %d 张照片, _photo_map=%d", len(photos), len(self._clusterer._photo_map))
         self.update()
 
     def highlight(self, name: str) -> None:
@@ -392,15 +392,10 @@ class _MapCanvas(QWidget):
             p.translate(self.width() / 2.0 - self._center_px,
                         self.height() / 2.0 - self._center_py)
 
-        # ── Layer 2a: 填充 + 普通边框 ──
+        # ── Layer 2a: 省份填充 (边框由底图瓦片提供，不再手绘粗糙矢量边线) ──
         for name, path in paths.items():
             color = QColor(self._province_colors.get(name, _DEFAULT_FILL))
             p.fillPath(path, QBrush(color))
-            if name != self._hovered:
-                pen = QPen(_BORDER_COLOR, pen_w)
-                pen.setCosmetic(True)
-                p.setPen(pen)
-                p.drawPath(path)
 
         # ── Layer 2b: 悬停发光 (最上层防止被邻省遮挡) ──
         if self._hovered:
@@ -627,9 +622,9 @@ class _MapCanvas(QWidget):
         self._view_mode = "national"
         self._current_province = None
         self._clusterer.cell_px = 50  # 恢复默认
-        self.set_cluster_mode("badge")
         self._photo_coords = []
         self._clusterer.load_photos([])
+        self.set_cluster_mode("badge")
         self._compute_initial_view()
         self.update()
 

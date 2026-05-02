@@ -120,7 +120,7 @@ class SettingsPanel(QFrame):
 
         self._thumb_check = QCheckBox("全国视图显示缩略图")
         self._thumb_check.stateChanged.connect(
-            lambda state: self.thumbnailToggleChanged.emit(state == Qt.Checked)
+            lambda state: self.thumbnailToggleChanged.emit(state == Qt.CheckState.Checked.value)
         )
         layout.addWidget(self._thumb_check)
 

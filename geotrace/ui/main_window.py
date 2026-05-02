@@ -377,19 +377,18 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def _on_thumbnail_toggle_changed(self, enabled: bool) -> None:
-        """全国视图缩略图常驻开关."""
         self._map_view._canvas.set_force_thumbnail_mode(enabled)
-        if self._map_view._canvas._view_mode == "national":
-            if enabled:
-                try:
-                    photos = self._db.get_photo_coords()
-                    self._map_view.set_photo_coords(photos)
-                    self._map_view._canvas.set_cluster_mode("thumbnail")
-                except Exception as e:
-                    logger.warning("加载全国照片坐标失败: %s", e)
-            else:
-                self._map_view.set_photo_coords([])
-                self._map_view._canvas.set_cluster_mode("badge")
+        if self._map_view._canvas._view_mode != "national":
+            return
+        if enabled:
+            photos = self._db.get_photo_coords()
+            if not photos:
+                return
+            self._map_view.set_photo_coords(photos)
+            self._map_view._canvas.set_cluster_mode("thumbnail")
+        else:
+            self._map_view.set_photo_coords([])
+            self._map_view._canvas.set_cluster_mode("badge")
 
     @Slot(int)
     def _on_frosted_alpha_changed(self, value: int) -> None:
@@ -566,6 +565,8 @@ class MainWindow(QMainWindow):
         self._init_settings_panel()
         self._refresh_stats()
         self._refresh_map_photos()
+        # 扫描完成后自动生成缺失缩略图，确保 thumbnail_path 被填充
+        self._on_generate_thumbnails()
 
     @Slot(str)
     def _on_scan_error(self, message: str) -> None:
