@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from geotrace.ui.blur_engine import (
@@ -26,8 +27,9 @@ class ProvinceListPanel(QFrame):
     provinceClicked = Signal(str)
     closeRequested = Signal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, capture_target: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._capture_target = capture_target
         self._stats: list[dict] = []
         self.setObjectName("floatingPanel")
         self.setMinimumWidth(170)
@@ -103,7 +105,9 @@ class ProvinceListPanel(QFrame):
         """首次显示时初始化模糊捕获引擎 & 异步抓取背景."""
         super().showEvent(event)
         if self.parent() and not self._blur_capture:
-            self._blur_capture = BackdropBlurCapture(self, blur_radius=25)
+            self._blur_capture = BackdropBlurCapture(
+                self, blur_radius=25, capture_target=self._capture_target,
+            )
         self._schedule_backdrop_capture()
 
     def paintEvent(self, event) -> None:

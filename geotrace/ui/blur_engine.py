@@ -55,24 +55,55 @@ def generate_noise_pixmap(
 
 
 class BackdropBlurCapture:
-    """Capture and blur the parent widget's content behind a child widget.
+    """Capture and blur content behind a child widget.
 
     Used by floating panels (ProvinceListPanel, SettingsPanel) that overlay
     the MapWidget. Captures the rendered map content in the widget's geometry,
     applies Gaussian blur, and caches the result.
 
+    If capture_target is provided, the backdrop is captured from that widget
+    instead of the child's parent — useful when the child is not a direct
+    overlay of the target (e.g., sidebar panel vs. map in QSplitter).
+
     IMPORTANT: Never call capture() from within the child's paintEvent —
     parent.grab() would render the child, causing recursive paintEvent → stack overflow.
     """
 
-    def __init__(self, child: QWidget, blur_radius: int = 25):
+    def __init__(self, child: QWidget, blur_radius: int = 25,
+                 capture_target: QWidget | None = None):
         self._child = child
         self._blur_radius = blur_radius
+        self._capture_target = capture_target
         self._cached_pixmap: QPixmap | None = None
         self._cached_geo: QRect | None = None
 
+    def _compute_source_rect(self) -> QRect | None:
+        """Map child's global rect into capture-target's local coords.
+
+        Returns None if the rect has zero overlap with the target.
+        """
+        if self._capture_target is None:
+            return self._child.geometry()
+
+        child_global_top_left = self._child.mapToGlobal(Qt.Point(0, 0))
+        child_rect_global = QRect(child_global_top_left, self._child.size())
+        target_global_rect = QRect(
+            self._capture_target.mapToGlobal(Qt.Point(0, 0)),
+            self._capture_target.size(),
+        )
+
+        intersection_global = child_rect_global.intersected(target_global_rect)
+        if intersection_global.isEmpty():
+            return None
+
+        top_left_in_target = self._capture_target.mapFromGlobal(
+            intersection_global.topLeft()
+        )
+
+        return QRect(top_left_in_target, intersection_global.size())
+
     def capture(self) -> QPixmap | None:
-        """Capture parent content behind this widget, blurred.
+        """Capture content behind this widget, blurred.
 
         Returns a pixmap sized to the widget, or None on failure.
         """
@@ -83,21 +114,47 @@ class BackdropBlurCapture:
         if self._cached_geo == geo and self._cached_pixmap and not self._cached_pixmap.isNull():
             return self._cached_pixmap
 
-        parent = self._child.parentWidget()
-        if parent is None:
+        target = self._capture_target or self._child.parentWidget()
+        if target is None:
             return None
 
         try:
-            full = parent.grab()
+            full = target.grab()
         except (AttributeError, RuntimeError):
-            full = QPixmap(parent.size())
+            full = QPixmap(target.size())
             full.fill(Qt.transparent)
-            parent.render(full)
+            target.render(full)
 
         if full.isNull():
             return None
 
-        cropped = full.copy(geo)
+        if self._capture_target is not None:
+            # Map child's position into the capture target's coordinate system
+            source_rect = self._compute_source_rect()
+            if source_rect is None:
+                return None
+
+            # Clamp source rect to the target pixmap bounds
+            target_rect = QRect(Qt.Point(0, 0), full.size())
+            clamped = source_rect.intersected(target_rect)
+            if clamped.isEmpty():
+                return None
+
+            # Create a pixmap sized to the CHILD, initialized with edge-extended
+            # pixels from target. For complete non-overlap the rect will be empty
+            # and we fall back to filling with the dominant color.
+            result_base = QPixmap(clamped.width(), clamped.height())
+            result_base.fill(Qt.transparent)
+            painter_base = QPainter(result_base)
+            painter_base.drawPixmap(Qt.Point(0, 0), full, clamped)
+            painter_base.end()
+
+            cropped = result_base
+        else:
+            cropped = full.copy(geo)
+
+        if cropped.isNull():
+            return None
 
         # Blur via QGraphicsScene + QGraphicsBlurEffect
         scene = QGraphicsScene()

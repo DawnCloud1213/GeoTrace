@@ -16,7 +16,7 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -86,8 +86,10 @@ class MainWindow(QMainWindow):
         self._sidebar.setMinimumWidth(260)
         self._sidebar.setMaximumWidth(400)
 
-        # Tab 0: 省份概览列表
-        self._province_list = ProvinceListPanel()
+        # Tab 0: 省份概览列表 (捕获地图作为毛玻璃背景源)
+        self._province_list = ProvinceListPanel(
+            capture_target=self._map_view,
+        )
         # 隐藏浮动面板的关闭按钮 (在 Tab 中不需要)
         for child in self._province_list.findChildren(QPushButton):
             if child.text() == "✕":
@@ -244,6 +246,15 @@ class MainWindow(QMainWindow):
         # Sidebar 宽度变化时更新设置面板位置
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
+        # 地图拖拽/缩放 → 防抖刷新毛玻璃背景
+        self._backdrop_refresh_timer = QTimer(self)
+        self._backdrop_refresh_timer.setSingleShot(True)
+        self._backdrop_refresh_timer.setInterval(100)
+        self._backdrop_refresh_timer.timeout.connect(
+            self._on_backdrop_refresh_tick
+        )
+        self._map_view.viewChanged.connect(self._schedule_backdrop_refresh)
+
     # ------------------------------------------------------------------
     # Sidebar 控制
     # ------------------------------------------------------------------
@@ -390,6 +401,18 @@ class MainWindow(QMainWindow):
         else:
             self._map_view.set_photo_coords([])
             self._map_view._canvas.set_cluster_mode("badge")
+
+    def _schedule_backdrop_refresh(self) -> None:
+        """防抖：地图拖拽/缩放后延迟刷新面板毛玻璃背景."""
+        self._backdrop_refresh_timer.start()
+
+    @Slot()
+    def _on_backdrop_refresh_tick(self) -> None:
+        """防抖定时器到期，刷新所有毛玻璃面板."""
+        if self._settings_panel.isVisible():
+            self._settings_panel.request_backdrop_refresh()
+        if self._province_list.isVisible():
+            self._province_list._schedule_backdrop_capture()
 
     @Slot(int)
     def _on_frosted_alpha_changed(self, value: int) -> None:

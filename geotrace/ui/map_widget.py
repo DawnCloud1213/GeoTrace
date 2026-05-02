@@ -93,6 +93,7 @@ class _MapCanvas(QWidget):
     provinceClicked = Signal(str)
     hoveredChanged = Signal(str)
     clusterClicked = Signal(list)  # list[int] 照片 id 列表
+    viewChanged = Signal()  # 拖拽/缩放时发出，通知外部刷新毛玻璃背景
 
     def __init__(self, tile_manager: TileManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -505,6 +506,7 @@ class _MapCanvas(QWidget):
         self._invalidate_paths()
         self._update_hover(event.position())
         self._update_label_opacity_target()
+        self.viewChanged.emit()
         self.update()
 
     def mousePressEvent(self, event) -> None:
@@ -523,6 +525,7 @@ class _MapCanvas(QWidget):
                 # 1:1 平移 (Mercator 像素 = 屏幕像素)
                 self._center_px = self._press_center[0] - delta.x()
                 self._center_py = self._press_center[1] - delta.y()
+                self.viewChanged.emit()
                 self.update()
         else:
             self._update_hover(event.position())
@@ -660,6 +663,7 @@ class MapWidget(QWidget):
     clusterClicked = Signal(list)  # 透传 canvas 信号
     provinceViewEntered = Signal(str)
     backToNational = Signal()
+    viewChanged = Signal()  # 透传 canvas 拖拽/缩放信号
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -696,6 +700,7 @@ class MapWidget(QWidget):
         self._canvas.provinceClicked.connect(self._on_province_clicked)
         self._canvas.hoveredChanged.connect(self._on_hovered_changed)
         self._canvas.clusterClicked.connect(self.clusterClicked.emit)
+        self._canvas.viewChanged.connect(self.viewChanged.emit)
         layout.addWidget(self._canvas)
 
         # 浮动按钮

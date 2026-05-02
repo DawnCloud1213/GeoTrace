@@ -261,6 +261,10 @@ class SettingsPanel(QFrame):
         self._schedule_backdrop_capture()
         self.update()
 
+    def request_backdrop_refresh(self) -> None:
+        """外部请求刷新毛玻璃背景（拖拽/缩放后防抖调用）."""
+        self._schedule_backdrop_capture()
+
     # ------------------------------------------------------------------
     # 内部回调
     # ------------------------------------------------------------------
