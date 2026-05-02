@@ -67,6 +67,11 @@ class Colors:
     SCROLL_HANDLE_HOVER = "#A89070"
     SCROLL_TRACK = "#F5F0E8"
 
+    # Frosted Glass (毛玻璃)
+    FROSTED_TINT_R = 250
+    FROSTED_TINT_G = 248
+    FROSTED_TINT_B = 243
+
 
 # ==========================================================================
 # Typography
@@ -135,8 +140,8 @@ QWidget {{
 
 /* ── QMenuBar ───────────────────────────────────────────────────── */
 QMenuBar {{
-    background-color: {Colors.WINDOW_BG};
-    border-bottom: 1px solid {Colors.BORDER_LIGHT};
+    background-color: rgba(250,248,243,0.70);
+    border-bottom: 1px solid rgba(232,224,208,0.30);
     padding: 2px 4px;
     font-size: 13px;
 }}
@@ -172,8 +177,8 @@ QMenu::separator {{
 
 /* ── QStatusBar ─────────────────────────────────────────────────── */
 QStatusBar {{
-    background-color: {Colors.WINDOW_BG};
-    border-top: 1px solid {Colors.BORDER_LIGHT};
+    background-color: rgba(250,248,243,0.70);
+    border-top: 1px solid rgba(232,224,208,0.30);
     padding: 2px 8px;
     font-size: 12px;
     color: {Colors.TEXT_SECONDARY};
@@ -346,6 +351,11 @@ QScrollArea {{
     background-color: transparent;
 }}
 
+/* ── QSplitter ──────────────────────────────────────────────────── */
+QSplitter::handle {{
+    background: transparent;
+}}
+
 /* ── FloatingPanel ──────────────────────────────────────────────── */
 QFrame#floatingPanel {{
     background: {Colors.PANEL_BG};
@@ -356,11 +366,11 @@ QFrame#floatingPanel {{
 /* ── QTabWidget / QTabBar ─────────────────────────────────────── */
 QTabWidget::pane {{
     border: none;
-    background-color: {Colors.WINDOW_BG};
+    background-color: rgba(250,248,243,0.55);
 }}
 QTabBar::tab {{
-    background: {Colors.CARD_BG};
-    border: 1px solid {Colors.BORDER_LIGHT};
+    background: rgba(255,255,255,0.50);
+    border: 1px solid rgba(232,224,208,0.25);
     border-bottom: none;
     border-top-left-radius: {Metrics.BORDER_RADIUS_SM}px;
     border-top-right-radius: {Metrics.BORDER_RADIUS_SM}px;
@@ -368,7 +378,7 @@ QTabBar::tab {{
     color: {Colors.TEXT_SECONDARY};
 }}
 QTabBar::tab:selected {{
-    background: {Colors.WINDOW_BG};
+    background: rgba(250,248,243,0.70);
     color: {Colors.TEXT_PRIMARY};
     font-weight: bold;
 }}
@@ -408,3 +418,18 @@ def frosted_rgba(alpha: float) -> str:
     """根据 0.0~1.0 alpha 生成白色 rgba 字符串."""
     a = max(0.0, min(1.0, alpha))
     return f"rgba(255,255,255,{a:.2f})"
+
+
+def frosted_sidebar_bg(alpha: float = 0.60) -> str:
+    """生成暖色调半透明侧边栏毛玻璃背景色.
+
+    与 frosted_rgba 不同，侧边栏需要暖色着色以与亚克力模糊底色融合，
+    而非纯白半透明。
+    """
+    a = max(0.0, min(1.0, alpha))
+    return (
+        f"rgba({Colors.FROSTED_TINT_R},{Colors.FROSTED_TINT_G},"
+        f"{Colors.FROSTED_TINT_B},{a:.2f})"
+    )
+
+

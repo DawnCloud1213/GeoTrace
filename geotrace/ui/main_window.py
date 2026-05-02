@@ -38,7 +38,7 @@ from geotrace.ui.photo_grid import PhotoGrid
 from geotrace.ui.photo_viewer import PhotoViewer
 from geotrace.ui.province_list import ProvinceListPanel
 from geotrace.ui.settings_panel import SettingsPanel
-from geotrace.ui.theme import Colors, Fonts, panel_shadow_effect
+from geotrace.ui.theme import Colors, Fonts, frosted_sidebar_bg, panel_shadow_effect
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,7 @@ class MainWindow(QMainWindow):
         self._splitter.setSizes([300, 1300])
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setHandleWidth(0)
+        self._splitter.setStyleSheet("QSplitter { background: transparent; }")
         self.setCentralWidget(self._splitter)
 
         # 状态栏
@@ -118,8 +119,8 @@ class MainWindow(QMainWindow):
         # 浮动设置面板 (parent=地图, 叠加在地图右上角)
         self._settings_panel = SettingsPanel(self._map_view)
         self._init_settings_panel()
-        self._settings_panel.set_frosted_alpha(0.85)
-        self._province_list.set_frosted_alpha(0.85)
+        self._settings_panel.set_frosted_alpha(0.63)
+        self._province_list.set_frosted_alpha(0.63)
 
         # 菜单栏
         self._setup_menus()
@@ -397,6 +398,14 @@ class MainWindow(QMainWindow):
         self._map_view.set_frosted_alpha(alpha)
         self._settings_panel.set_frosted_alpha(alpha)
         self._province_list.set_frosted_alpha(alpha)
+
+        sidebar_rgba = frosted_sidebar_bg(alpha)
+        self._sidebar.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: none;
+                background-color: {sidebar_rgba};
+            }}
+        """)
 
     @Slot(list)
     def _on_cluster_clicked(self, ids: list[int]) -> None:

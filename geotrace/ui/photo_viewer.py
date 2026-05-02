@@ -21,21 +21,25 @@ logger = logging.getLogger(__name__)
 
 _FROSTED_BTN = """
     QPushButton {{
-        background: rgba(0,0,0,0.25);
-        color: rgba(255,255,255,0.75);
-        border: 1px solid rgba(255,255,255,0.10);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 rgba(0,0,0,0.38),
+            stop:1 rgba(0,0,0,0.22));
+        color: rgba(255,255,255,0.80);
+        border: 1px solid rgba(255,255,255,0.15);
         border-radius: 8px;
         font-size: 18px;
     }}
     QPushButton:hover {{
-        background: rgba(0,0,0,0.50);
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 rgba(0,0,0,0.58),
+            stop:1 rgba(0,0,0,0.42));
         color: white;
-        border-color: rgba(255,255,255,0.28);
+        border-color: rgba(255,255,255,0.35);
     }}
     QPushButton:disabled {{
-        background: rgba(0,0,0,0.08);
-        color: rgba(255,255,255,0.12);
-        border-color: rgba(255,255,255,0.04);
+        background: rgba(0,0,0,0.10);
+        color: rgba(255,255,255,0.15);
+        border-color: rgba(255,255,255,0.06);
     }}
 """
 
@@ -93,9 +97,10 @@ class PhotoViewer(QDialog):
         self._counter_label = QLabel(self)
         self._counter_label.setFont(Fonts.ui(12))
         self._counter_label.setStyleSheet(
-            "color: rgba(255,255,255,0.75);"
-            "background: rgba(0,0,0,0.30);"
-            "border: 1px solid rgba(255,255,255,0.08);"
+            "color: rgba(255,255,255,0.80);"
+            "background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            "    stop:0 rgba(0,0,0,0.42), stop:1 rgba(0,0,0,0.28));"
+            "border: 1px solid rgba(255,255,255,0.12);"
             "border-radius: 10px;"
             "padding: 4px 14px;"
         )

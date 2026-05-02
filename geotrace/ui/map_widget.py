@@ -668,6 +668,10 @@ class MapWidget(QWidget):
         self._stats_max_val = 0
         self._frosted_alpha: float = 0.85
 
+        # 不透明背景 — 阻止 DWM 亚克力穿透地图区域
+        self.setStyleSheet(f"background-color: {_BG_COLOR.name()};")
+        self.setAutoFillBackground(True)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -819,12 +823,13 @@ class MapWidget(QWidget):
     def _update_overlay_styles(self) -> None:
         """根据当前 frosted_alpha 刷新所有浮动元素样式."""
         a = frosted_rgba(self._frosted_alpha)
-        a_hover = frosted_rgba(min(1.0, self._frosted_alpha + 0.10))
+        a_hover = frosted_rgba(min(1.0, self._frosted_alpha + 0.15))
+        border_alpha = int(self._frosted_alpha * 80)
 
         btn_ss = f"""
             QPushButton {{
                 background: {a};
-                border: 1px solid {Colors.BORDER_MEDIUM};
+                border: 1px solid rgba(200,184,152,{border_alpha / 255.0:.2f});
                 border-radius: {Metrics.BORDER_RADIUS_SM}px;
                 font-size: 16px;
                 color: {Colors.TEXT_SECONDARY};
@@ -832,7 +837,7 @@ class MapWidget(QWidget):
             }}
             QPushButton:hover {{
                 background: {a_hover};
-                border-color: {Colors.ACCENT_PRIMARY};
+                border-color: rgba(230,126,34,0.45);
                 color: {Colors.ACCENT_PRIMARY};
             }}
         """
@@ -843,7 +848,7 @@ class MapWidget(QWidget):
         self._hover_tooltip.setStyleSheet(f"""
             QLabel {{
                 background: {a};
-                border: 1px solid {Colors.BORDER_MEDIUM};
+                border: 1px solid rgba(200,184,152,{border_alpha / 255.0:.2f});
                 border-radius: 4px;
                 padding: 2px 8px;
                 font-size: 12px;
@@ -854,7 +859,7 @@ class MapWidget(QWidget):
         self._legend.setStyleSheet(f"""
             QFrame#mapLegend {{
                 background: {a};
-                border: 1px solid {Colors.BORDER_LIGHT};
+                border: 1px solid rgba(200,184,152,{border_alpha / 255.0:.2f});
                 border-radius: 6px;
                 padding: 8px;
             }}

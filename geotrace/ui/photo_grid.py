@@ -206,7 +206,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
         elif option.state & QStyle.State_MouseOver:
             card_bg = QColor(Colors.ACCENT_HOVER_LIGHT)
         else:
-            card_bg = QColor(Colors.CARD_BG)
+            card_bg = QColor(255, 255, 255, 220)
 
         painter.setBrush(card_bg)
         painter.setPen(QPen(QColor(Colors.BORDER_LIGHT), 1))
@@ -227,7 +227,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.setClipping(False)
         elif img_rect.isValid():
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(Colors.WINDOW_BG))
+            painter.setBrush(QColor(245, 240, 232, 120))
             painter.drawRoundedRect(img_rect, 6, 6)
             painter.setPen(QColor(Colors.TEXT_DISABLED))
             painter.drawText(img_rect, Qt.AlignCenter, "无预览")
@@ -317,11 +317,11 @@ class PhotoGrid(QWidget):
         self._list_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._list_view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self._list_view.verticalScrollBar().setSingleStep(40)
-        self._list_view.setStyleSheet(f"""
-            QListView {{
+        self._list_view.setStyleSheet("""
+            QListView {
                 border: none;
-                background-color: {Colors.WINDOW_BG};
-            }}
+                background-color: transparent;
+            }
         """)
 
         self._empty_label = QLabel("该省份暂无照片")
@@ -342,8 +342,10 @@ class PhotoGrid(QWidget):
         layout.addWidget(self._list_view, 1)
         layout.addWidget(self._empty_label, 1)
 
-        # 消除父级深色背景透出
-        self.setStyleSheet(f"background-color: {Colors.WINDOW_BG};")
+        # 半透明背景 — 融入侧边栏毛玻璃
+        self.setStyleSheet(
+            f"background-color: rgba({Colors.FROSTED_TINT_R},{Colors.FROSTED_TINT_G},{Colors.FROSTED_TINT_B},0.55);"
+        )
 
         # 信号连接
         self._back_btn.clicked.connect(self.returnToMap.emit)
