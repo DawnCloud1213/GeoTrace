@@ -27,9 +27,11 @@ class ProvinceListPanel(QFrame):
     provinceClicked = Signal(str)
     closeRequested = Signal()
 
-    def __init__(self, parent=None, capture_target: QWidget | None = None) -> None:
+    def __init__(self, parent=None, capture_target: QWidget | None = None,
+                 frosted: bool = True) -> None:
         super().__init__(parent)
         self._capture_target = capture_target
+        self._frosted = frosted
         self._stats: list[dict] = []
         self.setObjectName("floatingPanel")
         self.setMinimumWidth(170)
@@ -37,12 +39,15 @@ class ProvinceListPanel(QFrame):
         # ── 毛玻璃引擎 ──
         self._frosted_alpha: float = 0.63
         self._blur_capture: BackdropBlurCapture | None = None
-        self._noise_pixmap = generate_noise_pixmap(250, 400, opacity=0.04)
-        self._frosted_painter = FrostedSurfacePainter(
-            tint_color=QColor(255, 255, 255, int(self._frosted_alpha * 255)),
-            border_color=QColor(Colors.FROSTED_TINT_R, Colors.FROSTED_TINT_G, Colors.FROSTED_TINT_B, 40),
-            border_radius=float(Metrics.BORDER_RADIUS_MD),
-        )
+        self._noise_pixmap = None
+        self._frosted_painter = None
+        if self._frosted:
+            self._noise_pixmap = generate_noise_pixmap(250, 400, opacity=0.04)
+            self._frosted_painter = FrostedSurfacePainter(
+                tint_color=QColor(255, 255, 255, int(self._frosted_alpha * 255)),
+                border_color=QColor(Colors.FROSTED_TINT_R, Colors.FROSTED_TINT_G, Colors.FROSTED_TINT_B, 40),
+                border_radius=float(Metrics.BORDER_RADIUS_MD),
+            )
 
         # 覆盖 GLOBAL_QSS 的白色背景 — 毛玻璃由 paintEvent 渲染
         self.setStyleSheet(
@@ -104,11 +109,12 @@ class ProvinceListPanel(QFrame):
     def showEvent(self, event) -> None:
         """首次显示时初始化模糊捕获引擎 & 异步抓取背景."""
         super().showEvent(event)
-        if self.parent() and not self._blur_capture:
+        if self._frosted and self.parent() and not self._blur_capture:
             self._blur_capture = BackdropBlurCapture(
                 self, blur_radius=25, capture_target=self._capture_target,
             )
-        self._schedule_backdrop_capture()
+        if self._frosted:
+            self._schedule_backdrop_capture()
 
     def paintEvent(self, event) -> None:
         """渲染毛玻璃背板: 模糊背景(如有缓存) → 着色 → 噪点 → 边框.
@@ -116,6 +122,10 @@ class ProvinceListPanel(QFrame):
         注意: 决不在 paintEvent 内调用 capture() — parent.grab() 会触发
         递归 paintEvent, 导致 C++ 层栈溢出。
         """
+        if not self._frosted:
+            super().paintEvent(event)
+            return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
@@ -140,7 +150,7 @@ class ProvinceListPanel(QFrame):
 
     def _schedule_backdrop_capture(self) -> None:
         """异步抓取父控件背景 — 避免在 paintEvent 中递归 grab()."""
-        if self.isHidden():
+        if not self._frosted or self.isHidden():
             return
 
         def _capture() -> None:
@@ -154,6 +164,8 @@ class ProvinceListPanel(QFrame):
     def resizeEvent(self, event) -> None:
         """大小变化时失效模糊缓存 & 重新生成噪点并异步重抓取."""
         super().resizeEvent(event)
+        if not self._frosted:
+            return
         if self._blur_capture:
             self._blur_capture.invalidate()
         w, h = self.width(), self.height()
@@ -178,6 +190,8 @@ class ProvinceListPanel(QFrame):
 
     def set_frosted_alpha(self, alpha: float) -> None:
         """更新毛玻璃透明度并刷新."""
+        if not self._frosted:
+            return
         self._frosted_alpha = max(0.0, min(1.0, alpha))
         if self._blur_capture:
             self._blur_capture.invalidate()

@@ -1,44 +1,36 @@
-"""GeoTrace V2.0 主窗口 — QSplitter 左右分栏 + 常驻地图 + 浮动设置面板.
+"""GeoTrace V2.0 主窗口 — 全屏地图 + 浮动毛玻璃侧边栏.
 
 布局:
-  - QSplitter(Qt.Horizontal)
-    - 左侧 Sidebar: QTabWidget (Tab0=省份列表, Tab1=照片瀑布流)
-    - 右侧主体: MapWidget (全屏地图, 始终可见)
-  - 浮动: SettingsPanel (叠加在地图右上角)
+  - CentralWidget: MapWidget (全屏地图，始终可见)
+  - 浮动: FloatingSidebar (左侧毛玻璃面板，QTabWidget 包含省份列表/照片网格)
+  - 浮动: SettingsPanel (右侧毛玻璃面板，叠加在地图右上角)
 
 视图路由变化:
-  - 废弃 QStackedWidget 淡入淡出切换.
   - provinceClicked → 地图平滑飞行 + 左侧切到照片 Tab + 加载瀑布流.
   - clusterClicked → 左侧切到照片 Tab + 按 ID 加载.
-  - returnToMap 信号废弃 (地图常驻).
 """
 
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
-    QPushButton,
-    QSplitter,
     QStatusBar,
-    QTabWidget,
-    QVBoxLayout,
     QWidget,
 )
 
 from geotrace.core.spatial import SpatialIndex
 from geotrace.database.manager import DatabaseManager
+from geotrace.ui.floating_sidebar import FloatingSidebar
 from geotrace.ui.map_widget import MapWidget
-from geotrace.ui.photo_grid import PhotoGrid
 from geotrace.ui.photo_viewer import PhotoViewer
-from geotrace.ui.province_list import ProvinceListPanel
 from geotrace.ui.settings_panel import SettingsPanel
-from geotrace.ui.theme import Colors, Fonts, frosted_sidebar_bg, panel_shadow_effect
+from geotrace.ui.theme import Colors, Fonts, panel_shadow_effect
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +40,7 @@ _DEFAULT_DB = _DEFAULT_DATA_DIR / "geotrace_index.db"
 
 
 class MainWindow(QMainWindow):
-    """GeoTrace V2.0 主窗口 — QSplitter 左右分栏."""
+    """GeoTrace V2.0 主窗口 — 全屏地图 + 浮动侧边栏."""
 
     _REQUEST_MAP_REFRESH = Signal()
 
@@ -78,37 +70,18 @@ class MainWindow(QMainWindow):
         self._spatial_index: SpatialIndex | None = None
         self._init_spatial_index()
 
-        # ── 右侧: 地图 (始终可见) ──
+        # ── 中央地图 (始终可见) ──
         self._map_view = MapWidget()
+        self.setCentralWidget(self._map_view)
 
-        # ── 左侧 Sidebar ──
-        self._sidebar = QTabWidget()
-        self._sidebar.setMinimumWidth(260)
-        self._sidebar.setMaximumWidth(400)
+        # ── 浮动左侧面板 ──
+        self._floating_sidebar = FloatingSidebar(self._db, self._map_view)
+        self._floating_sidebar.set_frosted_alpha(0.63)
 
-        # Tab 0: 省份概览列表 (捕获地图作为毛玻璃背景源)
-        self._province_list = ProvinceListPanel(
-            capture_target=self._map_view,
-        )
-        # 隐藏浮动面板的关闭按钮 (在 Tab 中不需要)
-        for child in self._province_list.findChildren(QPushButton):
-            if child.text() == "✕":
-                child.setVisible(False)
-        self._sidebar.addTab(self._province_list, "省份")
-
-        # Tab 1: 地理瀑布流
-        self._photo_grid = PhotoGrid(self._db)
-        self._sidebar.addTab(self._photo_grid, "照片")
-
-        # ── QSplitter 分栏 ──
-        self._splitter = QSplitter(Qt.Horizontal)
-        self._splitter.addWidget(self._sidebar)
-        self._splitter.addWidget(self._map_view)
-        self._splitter.setSizes([300, 1300])
-        self._splitter.setStretchFactor(1, 1)
-        self._splitter.setHandleWidth(0)
-        self._splitter.setStyleSheet("QSplitter { background: transparent; }")
-        self.setCentralWidget(self._splitter)
+        # ── 浮动设置面板 (parent=地图, 叠加在地图右上角) ──
+        self._settings_panel = SettingsPanel(self._map_view)
+        self._init_settings_panel()
+        self._settings_panel.set_frosted_alpha(0.63)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -117,12 +90,6 @@ class MainWindow(QMainWindow):
         self._photo_count_label.setFont(Fonts.ui(9))
         self._photo_count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
         self._status_bar.addPermanentWidget(self._photo_count_label)
-
-        # 浮动设置面板 (parent=地图, 叠加在地图右上角)
-        self._settings_panel = SettingsPanel(self._map_view)
-        self._init_settings_panel()
-        self._settings_panel.set_frosted_alpha(0.63)
-        self._province_list.set_frosted_alpha(0.63)
 
         # 菜单栏
         self._setup_menus()
@@ -149,7 +116,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.error("空间索引初始化失败: %s", e)
                 QMessageBox.warning(
-                    self, "空间数据错误",
+                    self, "地图数据错误",
                     f"无法加载地图数据:\n{e}\n\n地图功能将不可用。",
                 )
         else:
@@ -186,7 +153,7 @@ class MainWindow(QMainWindow):
         view_menu = menu_bar.addMenu("视图(&V)")
         toggle_sidebar_action = view_menu.addAction("切换侧边栏(&B)")
         toggle_sidebar_action.setShortcut("Ctrl+B")
-        toggle_sidebar_action.triggered.connect(self._toggle_sidebar)
+        toggle_sidebar_action.triggered.connect(self._toggle_floating_sidebar)
         map_action = view_menu.addAction("聚焦地图(&M)")
         map_action.setShortcut("Ctrl+M")
         map_action.triggered.connect(self._focus_map)
@@ -213,18 +180,27 @@ class MainWindow(QMainWindow):
         bridge.unclassifiedClicked.connect(self._on_unclassified_clicked)
 
         # 照片网格双击打开大图
-        self._photo_grid.photoDoubleClicked.connect(self._on_photo_double_clicked)
+        self._floating_sidebar._photo_grid.photoDoubleClicked.connect(
+            self._on_photo_double_clicked
+        )
 
         # 照片网格返回全国视图
-        self._photo_grid.returnToMap.connect(self._exit_province_view)
+        self._floating_sidebar._photo_grid.returnToMap.connect(
+            self._exit_province_view
+        )
 
         # 地图浮动按钮
-        self._map_view.toggleProvinceList.connect(self._toggle_sidebar)
+        self._map_view.toggleProvinceList.connect(self._toggle_floating_sidebar)
         self._map_view.toggleSettings.connect(self._toggle_settings)
         self._settings_panel.closeRequested.connect(self._settings_panel.hide)
+        self._floating_sidebar.closeRequested.connect(
+            self._floating_sidebar.hide
+        )
 
         # 省份列表点击
-        self._province_list.provinceClicked.connect(self._enter_province_view)
+        self._floating_sidebar.provinceClicked.connect(
+            self._enter_province_view
+        )
 
         # 地图返回按钮
         self._map_view.backToNational.connect(self._exit_province_view)
@@ -243,47 +219,34 @@ class MainWindow(QMainWindow):
         # 聚类点击
         self._map_view.clusterClicked.connect(self._on_cluster_clicked)
 
-        # Sidebar 宽度变化时更新设置面板位置
-        self._splitter.splitterMoved.connect(self._on_splitter_moved)
-
-        # 地图拖拽/缩放 → 防抖刷新毛玻璃背景
-        self._backdrop_refresh_timer = QTimer(self)
-        self._backdrop_refresh_timer.setSingleShot(True)
-        self._backdrop_refresh_timer.setInterval(100)
-        self._backdrop_refresh_timer.timeout.connect(
-            self._on_backdrop_refresh_tick
-        )
-        self._map_view.viewChanged.connect(self._schedule_backdrop_refresh)
+        # 地图拖拽/缩放 → 实时刷新毛玻璃背景（无防抖）
+        self._map_view.viewChanged.connect(self._on_view_changed)
 
     # ------------------------------------------------------------------
-    # Sidebar 控制
+    # 浮动侧边栏控制
     # ------------------------------------------------------------------
 
-    def _toggle_sidebar(self) -> None:
-        """折叠/展开左侧 sidebar."""
-        sizes = self._splitter.sizes()
-        if sizes[0] > 0:
-            self._sidebar_last_width = max(sizes[0], 280)
-            self._splitter.setSizes([0, sum(sizes)])
+    def _toggle_floating_sidebar(self) -> None:
+        """切换左侧浮动侧边栏的显示/隐藏."""
+        if self._floating_sidebar.isVisible():
+            self._animate_slide_out(self._floating_sidebar, to_left=True)
         else:
-            w = getattr(self, '_sidebar_last_width', 320)
-            total = sum(sizes)
-            self._splitter.setSizes([w, max(total - w, 400)])
+            self._show_panel_with_shadow(self._floating_sidebar)
+            mh = self._map_view.height()
+            mw = self._map_view.width()
+            sidebar_w = self._floating_sidebar.width() or 300
+            self._floating_sidebar.setGeometry(
+                8, 40, sidebar_w, max(mh - 60, 300)
+            )
+            self._animate_slide_in(self._floating_sidebar, from_left=True)
 
     def _focus_map(self) -> None:
-        """收起 sidebar 聚焦地图."""
-        sizes = self._splitter.sizes()
-        if sizes[0] > 0:
-            self._sidebar_last_width = sizes[0]
-            self._splitter.setSizes([0, sum(sizes)])
-
-    def _on_splitter_moved(self) -> None:
-        """Sidebar 移动时隐藏设置面板避免位置错乱."""
-        if self._settings_panel.isVisible():
-            self._settings_panel.hide()
+        """收起浮动侧边栏聚焦地图."""
+        if self._floating_sidebar.isVisible():
+            self._animate_slide_out(self._floating_sidebar, to_left=True)
 
     # ------------------------------------------------------------------
-    # 浮动面板 (仅设置面板保留)
+    # 浮动面板 (设置面板)
     # ------------------------------------------------------------------
 
     def _toggle_settings(self) -> None:
@@ -291,10 +254,11 @@ class MainWindow(QMainWindow):
             self._animate_slide_out(self._settings_panel, to_left=False)
         else:
             self._show_panel_with_shadow(self._settings_panel)
-            # 定位在地图内部右上角
             mw = self._map_view.width()
             mh = self._map_view.height()
-            self._settings_panel.setGeometry(mw - 258, 40, 250, max(mh - 60, 200))
+            self._settings_panel.setGeometry(
+                mw - 258, 40, 250, max(mh - 60, 200)
+            )
             self._animate_slide_in(self._settings_panel, from_left=False)
 
     def _show_panel_with_shadow(self, panel: QWidget) -> None:
@@ -348,27 +312,18 @@ class MainWindow(QMainWindow):
         self._settings_panel.hide()
         photos = self._db.get_photo_coords(province_name)
         self._map_view.enter_province_view(province_name, photos)
-        self._photo_grid.load_province(province_name)
-        self._sidebar.setCurrentIndex(1)
-        # 自动展开 sidebar 如果处于折叠状态
-        sizes = self._splitter.sizes()
-        if sizes[0] == 0:
-            w = getattr(self, '_sidebar_last_width', 320)
-            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
+        self._floating_sidebar._photo_grid.load_province(province_name)
+        self._floating_sidebar.switch_to_photos_tab()
+        if not self._floating_sidebar.isVisible():
+            self._toggle_floating_sidebar()
 
     @Slot()
     def _exit_province_view(self) -> None:
-        """返回全国地图视图: sidebar 切回省份列表，清空照片聚类."""
+        """返回全国地图视图: 隐藏设置面板，清空照片聚类."""
         logger.info("返回全国视图")
         self._settings_panel.hide()
         self._map_view.exit_province_view()
-        self._sidebar.setCurrentIndex(0)
-        # 自动展开 sidebar 如果处于折叠状态
-        sizes = self._splitter.sizes()
-        if sizes[0] == 0:
-            w = getattr(self, '_sidebar_last_width', 320)
-            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
-        # 若常驻缩略图开启，恢复全国缩略图
+        self._floating_sidebar.switch_to_provinces_tab()
         if self._map_view._canvas._force_thumbnail_mode:
             try:
                 photos = self._db.get_photo_coords()
@@ -380,12 +335,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_unclassified_clicked(self) -> None:
         """显示未分类照片."""
-        self._photo_grid.load_province("Unclassified")
-        self._sidebar.setCurrentIndex(1)
-        sizes = self._splitter.sizes()
-        if sizes[0] == 0:
-            w = getattr(self, '_sidebar_last_width', 320)
-            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
+        self._floating_sidebar._photo_grid.load_province("Unclassified")
+        self._floating_sidebar.switch_to_photos_tab()
+        if not self._floating_sidebar.isVisible():
+            self._toggle_floating_sidebar()
 
     @Slot(bool)
     def _on_thumbnail_toggle_changed(self, enabled: bool) -> None:
@@ -402,17 +355,13 @@ class MainWindow(QMainWindow):
             self._map_view.set_photo_coords([])
             self._map_view._canvas.set_cluster_mode("badge")
 
-    def _schedule_backdrop_refresh(self) -> None:
-        """防抖：地图拖拽/缩放后延迟刷新面板毛玻璃背景."""
-        self._backdrop_refresh_timer.start()
-
     @Slot()
-    def _on_backdrop_refresh_tick(self) -> None:
-        """防抖定时器到期，刷新所有毛玻璃面板."""
+    def _on_view_changed(self) -> None:
+        """地图拖拽/缩放时实时刷新所有毛玻璃面板背景."""
         if self._settings_panel.isVisible():
             self._settings_panel.request_backdrop_refresh()
-        if self._province_list.isVisible():
-            self._province_list._schedule_backdrop_capture()
+        if self._floating_sidebar.isVisible():
+            self._floating_sidebar.request_backdrop_refresh()
 
     @Slot(int)
     def _on_frosted_alpha_changed(self, value: int) -> None:
@@ -420,27 +369,19 @@ class MainWindow(QMainWindow):
         alpha = value / 100.0
         self._map_view.set_frosted_alpha(alpha)
         self._settings_panel.set_frosted_alpha(alpha)
-        self._province_list.set_frosted_alpha(alpha)
-
-        sidebar_rgba = frosted_sidebar_bg(alpha)
-        self._sidebar.setStyleSheet(f"""
-            QTabWidget::pane {{
-                border: none;
-                background-color: {sidebar_rgba};
-            }}
-        """)
+        self._floating_sidebar.set_frosted_alpha(alpha)
 
     @Slot(list)
     def _on_cluster_clicked(self, ids: list[int]) -> None:
         """聚类点击：加载对应照片到 sidebar 照片 Tab."""
         if not ids:
             return
-        self._photo_grid.load_photo_ids(ids, title="选中区域")
-        self._sidebar.setCurrentIndex(1)
-        sizes = self._splitter.sizes()
-        if sizes[0] == 0:
-            w = getattr(self, '_sidebar_last_width', 320)
-            self._splitter.setSizes([w, max(sum(sizes) - w, 400)])
+        self._floating_sidebar._photo_grid.load_photo_ids(
+            ids, title="选中区域"
+        )
+        self._floating_sidebar.switch_to_photos_tab()
+        if not self._floating_sidebar.isVisible():
+            self._toggle_floating_sidebar()
 
     @Slot(str, object, int)
     def _on_photo_double_clicked(
@@ -463,7 +404,7 @@ class MainWindow(QMainWindow):
         """刷新省份统计并推送到地图和省份列表."""
         stats = self._db.get_province_stats_as_list()
         self._map_view.update_stats(stats)
-        self._province_list.refresh(stats)
+        self._floating_sidebar.refresh_province_list(stats)
 
         total = self._db.get_total_photo_count()
         self._photo_count_label.setText(f"照片总数: {total}")

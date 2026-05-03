@@ -821,6 +821,17 @@ class MapWidget(QWidget):
         self._hover_tooltip.raise_()
         self._legend.raise_()
 
+        # 钳制浮动面板位置，防止拖出可见区域
+        from PySide6.QtWidgets import QFrame
+        for child in self.findChildren(QFrame):
+            name = child.objectName()
+            if name in ("floatingSidebar", "floatingPanel") and child.isVisible():
+                cw = child.width()
+                ch = child.height()
+                cx = max(0, min(child.x(), self.width() - cw))
+                cy = max(0, min(child.y(), self.height() - 40))
+                child.move(cx, cy)
+
     @property
     def bridge(self) -> MapBridge:
         return self._bridge
