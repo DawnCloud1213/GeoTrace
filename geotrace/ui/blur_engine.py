@@ -6,7 +6,7 @@ Strategy B: Procedural noise texture overlay (grain on all frosted surfaces)
 
 import random
 
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QGraphicsBlurEffect, QGraphicsScene, QWidget
 
@@ -85,10 +85,10 @@ class BackdropBlurCapture:
         if self._capture_target is None:
             return self._child.geometry()
 
-        child_global_top_left = self._child.mapToGlobal(Qt.Point(0, 0))
+        child_global_top_left = self._child.mapToGlobal(QPoint(0, 0))
         child_rect_global = QRect(child_global_top_left, self._child.size())
         target_global_rect = QRect(
-            self._capture_target.mapToGlobal(Qt.Point(0, 0)),
+            self._capture_target.mapToGlobal(QPoint(0, 0)),
             self._capture_target.size(),
         )
 
@@ -135,7 +135,7 @@ class BackdropBlurCapture:
                 return None
 
             # Clamp source rect to the target pixmap bounds
-            target_rect = QRect(Qt.Point(0, 0), full.size())
+            target_rect = QRect(QPoint(0, 0), full.size())
             clamped = source_rect.intersected(target_rect)
             if clamped.isEmpty():
                 return None
@@ -146,7 +146,7 @@ class BackdropBlurCapture:
             result_base = QPixmap(clamped.width(), clamped.height())
             result_base.fill(Qt.transparent)
             painter_base = QPainter(result_base)
-            painter_base.drawPixmap(Qt.Point(0, 0), full, clamped)
+            painter_base.drawPixmap(QPoint(0, 0), full, clamped)
             painter_base.end()
 
             cropped = result_base

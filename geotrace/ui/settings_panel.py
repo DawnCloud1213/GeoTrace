@@ -156,11 +156,7 @@ class SettingsPanel(QFrame):
 
         self._thumb_check = QCheckBox("全国视图显示缩略图")
         self._thumb_check.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
-        self._thumb_check.stateChanged.connect(
-            lambda state: self.thumbnailToggleChanged.emit(
-                int(state) == int(Qt.CheckState.Checked)
-            )
-        )
+        self._thumb_check.toggled.connect(self.thumbnailToggleChanged.emit)
         layout.addWidget(self._thumb_check)
 
         # 透明度滑块

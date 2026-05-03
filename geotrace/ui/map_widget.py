@@ -612,6 +612,8 @@ class _MapCanvas(QWidget):
 
     def set_force_thumbnail_mode(self, enabled: bool) -> None:
         self._force_thumbnail_mode = enabled
+        if self._view_mode == "national":
+            self.set_cluster_mode("thumbnail" if enabled else "badge")
 
     def enter_province_view(self, province_name: str, photos: list[dict]) -> None:
         self._view_mode = "province"

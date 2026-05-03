@@ -350,10 +350,8 @@ class MainWindow(QMainWindow):
             if not photos:
                 return
             self._map_view.set_photo_coords(photos)
-            self._map_view._canvas.set_cluster_mode("thumbnail")
         else:
             self._map_view.set_photo_coords([])
-            self._map_view._canvas.set_cluster_mode("badge")
 
     @Slot()
     def _on_view_changed(self) -> None:
