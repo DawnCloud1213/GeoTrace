@@ -44,6 +44,7 @@ class SettingsPanel(QFrame):
         # ── 毛玻璃引擎 ──
         self._frosted_alpha: float = 0.63
         self._blur_capture: BackdropBlurCapture | None = None
+        self._capture_pending = False
         self._noise_pixmap = generate_noise_pixmap(250, 500, opacity=0.04)
         self._frosted_painter = FrostedSurfacePainter(
             tint_color=QColor(255, 255, 255, int(self._frosted_alpha * 255)),
@@ -64,6 +65,7 @@ class SettingsPanel(QFrame):
         header = QHBoxLayout()
         title = QLabel("设置")
         title.setFont(Fonts.title(11))
+        title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
         header.addWidget(title)
         header.addStretch()
         close_btn = QPushButton("✕")
@@ -77,6 +79,7 @@ class SettingsPanel(QFrame):
         # ── 照片目录 ──
         dir_label = QLabel("照片目录")
         dir_label.setFont(Fonts.title(10))
+        dir_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
         layout.addWidget(dir_label)
 
         self._dir_list = QListWidget()
@@ -86,10 +89,12 @@ class SettingsPanel(QFrame):
                 border-radius: 4px;
                 background: rgba(250,250,245,0.50);
                 font-size: 12px;
+                color: {Colors.TEXT_PRIMARY};
             }}
             QListWidget::item {{
                 padding: 4px 8px;
                 border-bottom: 1px solid rgba(232,224,208,0.30);
+                color: {Colors.TEXT_PRIMARY};
             }}
             QListWidget::item:hover {{
                 background: rgba(255,243,224,0.60);
@@ -99,11 +104,17 @@ class SettingsPanel(QFrame):
 
         add_btn = QPushButton("+ 添加目录")
         add_btn.setProperty("cssClass", "success")
+        add_btn.style().unpolish(add_btn)
+        add_btn.style().polish(add_btn)
+        add_btn.setStyleSheet("color: #503214; font-weight: bold;")
         add_btn.clicked.connect(self._on_add_directory)
         layout.addWidget(add_btn)
 
         remove_btn = QPushButton("- 移除选中")
         remove_btn.setProperty("cssClass", "danger")
+        remove_btn.style().unpolish(remove_btn)
+        remove_btn.style().polish(remove_btn)
+        remove_btn.setStyleSheet("color: #FFFFFF; font-weight: bold; background-color: #B5432E; border: none;")
         remove_btn.clicked.connect(self._on_remove_directory)
         layout.addWidget(remove_btn)
 
@@ -116,11 +127,14 @@ class SettingsPanel(QFrame):
         # ── 扫描 ──
         scan_label = QLabel("扫描")
         scan_label.setFont(Fonts.title(10))
+        scan_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
         layout.addWidget(scan_label)
 
         rescan_btn = QPushButton("重新扫描所有目录")
         rescan_btn.setProperty("cssClass", "primary")
-        rescan_btn.setStyleSheet("font-size: 13px; padding: 7px 12px;")
+        rescan_btn.style().unpolish(rescan_btn)
+        rescan_btn.style().polish(rescan_btn)
+        rescan_btn.setStyleSheet(f"font-size: 13px; padding: 7px 12px; color: #FFFFFF; background-color: {Colors.ACCENT_PRIMARY}; border: none;")
         rescan_btn.clicked.connect(self._on_rescan)
         layout.addWidget(rescan_btn)
 
@@ -137,17 +151,23 @@ class SettingsPanel(QFrame):
         # ── 显示效果 ──
         fx_label = QLabel("显示效果")
         fx_label.setFont(Fonts.title(10))
+        fx_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
         layout.addWidget(fx_label)
 
         self._thumb_check = QCheckBox("全国视图显示缩略图")
+        self._thumb_check.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
         self._thumb_check.stateChanged.connect(
-            lambda state: self.thumbnailToggleChanged.emit(state == Qt.CheckState.Checked.value)
+            lambda state: self.thumbnailToggleChanged.emit(
+                int(state) == int(Qt.CheckState.Checked)
+            )
         )
         layout.addWidget(self._thumb_check)
 
         # 透明度滑块
         slider_row = QHBoxLayout()
-        slider_row.addWidget(QLabel("面板透明度"))
+        slider_label = QLabel("面板透明度")
+        slider_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        slider_row.addWidget(slider_label)
 
         self._alpha_slider = QSlider(Qt.Horizontal)
         self._alpha_slider.setRange(30, 100)
@@ -160,6 +180,7 @@ class SettingsPanel(QFrame):
         self._alpha_value_label = QLabel("63%")
         self._alpha_value_label.setFixedWidth(36)
         self._alpha_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._alpha_value_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
         self._alpha_slider.valueChanged.connect(
             lambda v: self._alpha_value_label.setText(f"{v}%")
         )
@@ -177,7 +198,9 @@ class SettingsPanel(QFrame):
         """首次显示时初始化模糊捕获引擎 & 异步抓取背景."""
         super().showEvent(event)
         if self.parent() and not self._blur_capture:
-            self._blur_capture = BackdropBlurCapture(self, blur_radius=25)
+            self._blur_capture = BackdropBlurCapture(
+                self, blur_radius=25, capture_target=self.parent()
+            )
         self._schedule_backdrop_capture()
 
     def paintEvent(self, event) -> None:
@@ -195,7 +218,8 @@ class SettingsPanel(QFrame):
             if not geo.isEmpty() and geo.width() > 0 and geo.height() > 0:
                 if (self._blur_capture._cached_geo == geo
                         and self._blur_capture._cached_pixmap
-                        and not self._blur_capture._cached_pixmap.isNull()):
+                        and not self._blur_capture._cached_pixmap.isNull()
+                        and not self._capture_pending):
                     backdrop = self._blur_capture._cached_pixmap
 
         tint_alpha = int(self._frosted_alpha * 255)
@@ -207,17 +231,23 @@ class SettingsPanel(QFrame):
         super().paintEvent(event)
 
     def _schedule_backdrop_capture(self) -> None:
-        """异步抓取父控件背景 — 避免在 paintEvent 中递归 grab()."""
-        if self.isHidden():
+        """异步抓取父控件背景 — 避免在 paintEvent 中递归 grab().
+
+        合并式刷新：同时最多只有一次待处理的捕获。
+        """
+        if self.isHidden() or self._capture_pending:
             return
 
+        self._capture_pending = True
+
         def _capture() -> None:
+            self._capture_pending = False
             if self._blur_capture is not None and not self.isHidden():
                 self._blur_capture.invalidate()
                 self._blur_capture.capture()
                 self.update()
 
-        QTimer.singleShot(50, _capture)
+        QTimer.singleShot(0, _capture)
 
     def resizeEvent(self, event) -> None:
         """大小变化时失效模糊缓存 & 重新生成噪点并异步重抓取."""
