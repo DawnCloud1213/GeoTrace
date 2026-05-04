@@ -13,7 +13,7 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -82,6 +82,12 @@ class MainWindow(QMainWindow):
         self._settings_panel = SettingsPanel(self._map_view)
         self._init_settings_panel()
         self._settings_panel.set_frosted_alpha(0.63)
+
+        # ── 毛玻璃防抖：地图拖拽/缩放停止 100ms 后才刷新 ──
+        self._blur_debounce_timer = QTimer()
+        self._blur_debounce_timer.setSingleShot(True)
+        self._blur_debounce_timer.setInterval(100)
+        self._blur_debounce_timer.timeout.connect(self._do_backdrop_refresh)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -219,7 +225,6 @@ class MainWindow(QMainWindow):
         # 聚类点击
         self._map_view.clusterClicked.connect(self._on_cluster_clicked)
 
-        # 地图拖拽/缩放 → 实时刷新毛玻璃背景（无防抖）
         self._map_view.viewChanged.connect(self._on_view_changed)
 
     # ------------------------------------------------------------------
@@ -355,7 +360,16 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_view_changed(self) -> None:
-        """地图拖拽/缩放时实时刷新所有毛玻璃面板背景."""
+        """地图拖拽/缩放时防抖刷新毛玻璃背景.
+
+        每次拖拽/缩放事件都重启定时器，仅在停止 100ms 后执行一次刷新，
+        与 macOS / Windows Acrylic 行为一致。
+        """
+        if self._settings_panel.isVisible() or self._floating_sidebar.isVisible():
+            self._blur_debounce_timer.start()
+
+    def _do_backdrop_refresh(self) -> None:
+        """防抖定时器到期后执行真正的毛玻璃背景刷新."""
         if self._settings_panel.isVisible():
             self._settings_panel.request_backdrop_refresh()
         if self._floating_sidebar.isVisible():

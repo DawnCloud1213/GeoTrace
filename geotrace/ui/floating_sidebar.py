@@ -17,7 +17,7 @@ from geotrace.database.manager import DatabaseManager
 from geotrace.ui.blur_engine import (
     BackdropBlurCapture,
     FrostedSurfacePainter,
-    generate_noise_pixmap,
+    generate_noise_pixmap_multiscale,
 )
 from geotrace.ui.photo_grid import PhotoGrid
 from geotrace.ui.province_list import ProvinceListPanel
@@ -304,7 +304,7 @@ class FloatingSidebar(QFrame):
             )
         w, h = self.width(), self.height()
         if w > 0 and h > 0:
-            self._noise_pixmap = generate_noise_pixmap(w, h, opacity=0.04)
+            self._noise_pixmap = generate_noise_pixmap_multiscale(w, h)
 
     def paintEvent(self, event) -> None:
         """渲染毛玻璃背板 + 滑块指示器."""
@@ -360,8 +360,12 @@ class FloatingSidebar(QFrame):
         self._invalidate_blur()
         w, h = self.width(), self.height()
         if w > 0 and h > 0:
-            noise_opacity = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap(w, h, opacity=noise_opacity)
+            noise_total = 0.02 + self._frosted_alpha * 0.03
+            self._noise_pixmap = generate_noise_pixmap_multiscale(
+                w, h,
+                fine_opacity=noise_total * 0.625,
+                coarse_opacity=noise_total * 0.375,
+            )
         self._schedule_backdrop_capture()
 
     # ------------------------------------------------------------------
@@ -374,8 +378,12 @@ class FloatingSidebar(QFrame):
             self._blur_capture.invalidate()
         w, h = self.width(), self.height()
         if w > 0 and h > 0:
-            noise_opacity = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap(w, h, opacity=noise_opacity)
+            noise_total = 0.02 + self._frosted_alpha * 0.03
+            self._noise_pixmap = generate_noise_pixmap_multiscale(
+                w, h,
+                fine_opacity=noise_total * 0.625,
+                coarse_opacity=noise_total * 0.375,
+            )
         self._schedule_backdrop_capture()
         self.update()
 

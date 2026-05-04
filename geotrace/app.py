@@ -4,6 +4,7 @@ import logging
 import sys
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from geotrace.ui.main_window import MainWindow
@@ -34,9 +35,20 @@ def main() -> None:
     setup_logging()
     logger = logging.getLogger(__name__)
 
+    # ── GPU 渲染：OpenGL 3.3 核心配置 + 4x MSAA 抗锯齿 ──
+    fmt = QSurfaceFormat()
+    fmt.setVersion(3, 3)
+    fmt.setProfile(QSurfaceFormat.CoreProfile)
+    fmt.setDepthBufferSize(24)
+    fmt.setStencilBufferSize(8)
+    fmt.setSwapInterval(1)
+    fmt.setSamples(4)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

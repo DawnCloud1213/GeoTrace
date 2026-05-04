@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from geotrace.ui.blur_engine import (
     BackdropBlurCapture,
     FrostedSurfacePainter,
-    generate_noise_pixmap,
+    generate_noise_pixmap_multiscale,
 )
 from geotrace.ui.theme import Colors, Fonts, Metrics
 
@@ -42,7 +42,7 @@ class ProvinceListPanel(QFrame):
         self._noise_pixmap = None
         self._frosted_painter = None
         if self._frosted:
-            self._noise_pixmap = generate_noise_pixmap(250, 400, opacity=0.04)
+            self._noise_pixmap = generate_noise_pixmap_multiscale(250, 400)
             self._frosted_painter = FrostedSurfacePainter(
                 tint_color=QColor(255, 255, 255, int(self._frosted_alpha * 255)),
                 border_color=QColor(Colors.FROSTED_TINT_R, Colors.FROSTED_TINT_G, Colors.FROSTED_TINT_B, 40),
@@ -170,8 +170,12 @@ class ProvinceListPanel(QFrame):
             self._blur_capture.invalidate()
         w, h = self.width(), self.height()
         if w > 0 and h > 0:
-            noise_opacity = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap(w, h, opacity=noise_opacity)
+            noise_total = 0.02 + self._frosted_alpha * 0.03
+            self._noise_pixmap = generate_noise_pixmap_multiscale(
+                w, h,
+                fine_opacity=noise_total * 0.625,
+                coarse_opacity=noise_total * 0.375,
+            )
         self._schedule_backdrop_capture()
 
     # ------------------------------------------------------------------
@@ -197,8 +201,12 @@ class ProvinceListPanel(QFrame):
             self._blur_capture.invalidate()
         w, h = self.width(), self.height()
         if w > 0 and h > 0:
-            noise_opacity = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap(w, h, opacity=noise_opacity)
+            noise_total = 0.02 + self._frosted_alpha * 0.03
+            self._noise_pixmap = generate_noise_pixmap_multiscale(
+                w, h,
+                fine_opacity=noise_total * 0.625,
+                coarse_opacity=noise_total * 0.375,
+            )
         self._schedule_backdrop_capture()
         self.update()
 

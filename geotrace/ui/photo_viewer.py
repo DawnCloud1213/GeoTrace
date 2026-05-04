@@ -1,17 +1,21 @@
-"""单张照片大图查看对话框 — 滚轮缩放、左键拖拽平移、前后导航."""
+"""单张照片大图查看对话框 — GPU 纹理缩放、左键拖拽平移、前后导航.
+
+v2.0: QOpenGLWidget 替换 QScrollArea+QLabel, 缩放不再走 CPU QPixmap.scaled(),
+      而是通过 QPainter (OpenGL 后端) 在 GPU 上直接完成纹理采样缩放.
+"""
 
 import logging
 from pathlib import Path
 from io import BytesIO
 
 from PIL import Image, ImageOps
-from PySide6.QtCore import Qt, QPoint, QEvent
-from PySide6.QtGui import QAction, QKeySequence, QPixmap
+from PySide6.QtCore import Qt, QPoint, QEvent, QPointF
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPixmap
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
 )
 
@@ -44,8 +48,194 @@ _FROSTED_BTN = """
 """
 
 
+class _GpuPhotoWidget(QOpenGLWidget):
+    """OpenGL 加速的照片显示 widget — QPainter 纹理缩放 + 鼠标拖拽平移."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pixmap: QPixmap | None = None
+        self._scale: float = 1.0
+        self._offset_x: float = 0.0
+        self._offset_y: float = 0.0
+        self._panning: bool = False
+        self._pan_last: QPointF | None = None
+        self.setMouseTracking(True)
+        self.setCursor(Qt.OpenHandCursor)
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    def setPhoto(self, pixmap: QPixmap) -> None:
+        self._pixmap = pixmap
+        self._offset_x = 0.0
+        self._offset_y = 0.0
+        self._scale = 1.0
+
+    def photoSize(self) -> tuple[int, int]:
+        if self._pixmap is None:
+            return 0, 0
+        return self._pixmap.width(), self._pixmap.height()
+
+    def scale(self) -> float:
+        return self._scale
+
+    def setScale(self, value: float) -> None:
+        self._scale = max(0.05, min(20.0, value))
+
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
+
+    def _content_rect(self) -> tuple[float, float, float, float]:
+        """Return (cx, cy, cw, ch) — the centred content rect in widget space."""
+        pw, ph = self.photoSize()
+        cw = pw * self._scale
+        ch = ph * self._scale
+        cx = (self.width() - cw) / 2.0 + self._offset_x
+        cy = (self.height() - ch) / 2.0 + self._offset_y
+        return cx, cy, cw, ch
+
+    def _widget_to_pix(self, wx: float, wy: float) -> tuple[float, float]:
+        """Convert widget coords → pixmap pixel coords."""
+        cx, cy, cw, ch = self._content_rect()
+        pw, ph = self.photoSize()
+        return ((wx - cx) / max(cw / pw, 0.001),
+                (wy - cy) / max(ch / ph, 0.001))
+
+    # ------------------------------------------------------------------
+    # GL lifecycle
+    # ------------------------------------------------------------------
+
+    def initializeGL(self) -> None:
+        pass
+
+    def resizeGL(self, w: int, h: int) -> None:
+        pass
+
+    def paintGL(self) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        if self._pixmap is None or self._pixmap.isNull():
+            p.fillRect(self.rect(), QColor(Colors.MAP_BG))
+            p.end()
+            return
+
+        cx, cy, cw, ch = self._content_rect()
+        if cw > 0 and ch > 0:
+            p.drawPixmap(int(cx), int(cy), int(cw), int(ch), self._pixmap)
+        p.end()
+
+    # ------------------------------------------------------------------
+    # Mouse events — pan + wheel zoom
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._panning = True
+            self._pan_last = event.position()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._panning and self._pan_last is not None:
+            pos = event.position()
+            dx = pos.x() - self._pan_last.x()
+            dy = pos.y() - self._pan_last.y()
+            self._offset_x += dx
+            self._offset_y += dy
+            self._pan_last = pos
+            self.update()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._panning = False
+            self._pan_last = None
+            self.setCursor(Qt.OpenHandCursor)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        if self._pixmap is None:
+            return
+        dy = event.angleDelta().y()
+        if dy == 0:
+            return
+
+        # Mouse-anchored zoom
+        pos = event.position()
+        pix_x, pix_y = self._widget_to_pix(pos.x(), pos.y())
+
+        old_scale = self._scale
+        factor = 1.0008 ** dy
+        new_scale = max(0.05, min(20.0, old_scale * factor))
+
+        pw, ph = self.photoSize()
+        new_cw = pw * new_scale
+        new_ch = ph * new_scale
+        new_cx = (self.width() - new_cw) / 2.0
+        new_cy = (self.height() - new_ch) / 2.0
+
+        # Offset so the pixmap point under the mouse stays fixed
+        self._offset_x = pos.x() - new_cx - pix_x * new_scale
+        self._offset_y = pos.y() - new_cy - pix_y * new_scale
+        self._scale = new_scale
+
+        self.update()
+        event.accept()
+
+    # ------------------------------------------------------------------
+    # Public zoom API (used by keyboard shortcuts)
+    # ------------------------------------------------------------------
+
+    def zoom(self, factor: float) -> None:
+        if self._pixmap is None:
+            return
+        old = self._scale
+        new_scale = max(0.05, min(20.0, old * factor))
+        if new_scale == old:
+            return
+
+        # Anchor at viewport centre
+        pw, ph = self.photoSize()
+        cx_pix = pw / 2.0
+        cy_pix = ph / 2.0
+
+        new_cw = pw * new_scale
+        new_ch = ph * new_scale
+        new_cx = (self.width() - new_cw) / 2.0
+        new_cy = (self.height() - new_ch) / 2.0
+
+        self._offset_x = self.width() / 2.0 - new_cx - cx_pix * new_scale
+        self._offset_y = self.height() / 2.0 - new_cy - cy_pix * new_scale
+        self._scale = new_scale
+        self.update()
+
+    def fit_to_window(self) -> None:
+        if self._pixmap is None:
+            return
+        pw, ph = self.photoSize()
+        avail_w = self.width()
+        avail_h = self.height()
+        if avail_w <= 0 or avail_h <= 0:
+            return
+
+        s = min(avail_w / pw, avail_h / ph)
+        self._scale = s
+        self._offset_x = 0.0
+        self._offset_y = 0.0
+        self.update()
+
+
 class PhotoViewer(QDialog):
-    """照片大图查看器 — 滚轮缩放、左键拖拽平移、左右箭头切换."""
+    """照片大图查看器 — GPU 纹理缩放、左键拖拽平移、左右箭头切换."""
 
     def __init__(
         self, current_path: str, all_paths: list[str],
@@ -54,31 +244,19 @@ class PhotoViewer(QDialog):
         super().__init__(parent)
         self._current_index = current_index
         self._all_paths = all_paths
-        self._scale_factor = 1.0
         self._pixmap: QPixmap | None = None
-        self._panning = False
-        self._pan_last = QPoint()
 
         self.setWindowTitle(Path(current_path).name)
         self.resize(1200, 800)
         self.setMinimumSize(400, 300)
         self.setStyleSheet(f"QDialog {{ background-color: {Colors.MAP_BG}; }}")
 
-        # 图片显示层
-        self._label = QLabel()
-        self._label.setAlignment(Qt.AlignCenter)
-        self._label.setScaledContents(False)
-
-        scroll = QScrollArea()
-        scroll.setWidget(self._label)
-        scroll.setWidgetResizable(False)
-        scroll.setAlignment(Qt.AlignCenter)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        self._scroll_area = scroll
+        # GPU 照片渲染层 (替换旧 QScrollArea+QLabel)
+        self._photo_widget = _GpuPhotoWidget(self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll)
+        layout.addWidget(self._photo_widget)
 
         # 浮动切换按钮 (左右两侧, 毛玻璃)
         self._btn_prev = QPushButton("◀", self)
@@ -120,47 +298,7 @@ class PhotoViewer(QDialog):
             action.triggered.connect(slot)
             self.addAction(action)
 
-        # 事件过滤器: 左键拖拽平移
-        scroll.viewport().installEventFilter(self)
-        scroll.viewport().setCursor(Qt.OpenHandCursor)
-
         self._load_image()
-
-    # ------------------------------------------------------------------
-    # 事件过滤器 — 左键拖拽平移 + 滚轮无级缩放
-    # ------------------------------------------------------------------
-
-    def eventFilter(self, obj, event) -> bool:
-        vp = self._scroll_area.viewport()
-        if obj is not vp:
-            return super().eventFilter(obj, event)
-
-        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-            self._panning = True
-            self._pan_last = event.globalPosition().toPoint()
-            vp.setCursor(Qt.ClosedHandCursor)
-            return True
-
-        if event.type() == QEvent.MouseMove and self._panning:
-            cur = event.globalPosition().toPoint()
-            delta = cur - self._pan_last
-            self._pan_last = cur
-            hb = self._scroll_area.horizontalScrollBar()
-            vb = self._scroll_area.verticalScrollBar()
-            hb.setValue(hb.value() - delta.x())
-            vb.setValue(vb.value() - delta.y())
-            return True
-
-        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
-            self._panning = False
-            vp.setCursor(Qt.OpenHandCursor)
-            return True
-
-        if event.type() == QEvent.Wheel:
-            self._handle_wheel_zoom(event)
-            return True
-
-        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
     # 浮动控件定位
@@ -169,8 +307,7 @@ class PhotoViewer(QDialog):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._layout_overlays()
-        if self._scale_factor <= 1.01:
-            self._fit_to_window()
+        self._photo_widget.fit_to_window()
 
     def _layout_overlays(self) -> None:
         w, h = self.width(), self.height()
@@ -195,13 +332,11 @@ class PhotoViewer(QDialog):
     def _prev(self) -> None:
         if self._current_index > 0:
             self._current_index -= 1
-            self._scale_factor = 1.0
             self._load_image()
 
     def _next(self) -> None:
         if self._current_index < len(self._all_paths) - 1:
             self._current_index += 1
-            self._scale_factor = 1.0
             self._load_image()
 
     # ------------------------------------------------------------------
@@ -216,10 +351,6 @@ class PhotoViewer(QDialog):
             img_rgb = img.convert("RGB")
         except Exception as e:
             logger.error("无法加载图片 %s: %s", file_path, e)
-            self._label.setStyleSheet(
-                f"color: {Colors.TEXT_SECONDARY}; font-size: 14px;"
-            )
-            self._label.setText(f"无法加载图片:\n{file_path}\n\n{e}")
             self._update_nav_state()
             return
 
@@ -228,7 +359,9 @@ class PhotoViewer(QDialog):
         pixmap = QPixmap()
         pixmap.loadFromData(buf.getvalue())
         self._pixmap = pixmap
-        self._fit_to_window()
+
+        self._photo_widget.setPhoto(pixmap)
+        self._photo_widget.fit_to_window()
         self._update_nav_state()
 
     # ------------------------------------------------------------------
@@ -236,78 +369,10 @@ class PhotoViewer(QDialog):
     # ------------------------------------------------------------------
 
     def _zoom_in(self) -> None:
-        if self._pixmap:
-            self._zoom(1.25)
+        self._photo_widget.zoom(1.25)
 
     def _zoom_out(self) -> None:
-        if self._pixmap:
-            self._zoom(1.0 / 1.25)
-
-    def _zoom(self, factor: float) -> None:
-        old = self._scale_factor
-        self._scale_factor = max(0.05, min(20.0, self._scale_factor * factor))
-        self._apply_scale_with_anchor(old)
+        self._photo_widget.zoom(1.0 / 1.25)
 
     def _fit_to_window(self) -> None:
-        if self._pixmap is None:
-            return
-        self._scale_factor = 1.0
-        avail = self._scroll_area.viewport().size()
-        scaled = self._pixmap.scaled(
-            avail, Qt.KeepAspectRatio, Qt.SmoothTransformation,
-        )
-        self._label.setPixmap(scaled)
-        self._label.resize(scaled.size())
-
-    def _apply_scale_with_anchor(self, old_scale: float) -> None:
-        vp = self._scroll_area.viewport()
-        hb = self._scroll_area.horizontalScrollBar()
-        vb = self._scroll_area.verticalScrollBar()
-
-        cx = vp.width() / 2 + hb.value()
-        cy = vp.height() / 2 + vb.value()
-
-        ratio = self._scale_factor / max(old_scale, 0.001)
-        new_size = self._pixmap.size() * self._scale_factor
-        scaled = self._pixmap.scaled(
-            new_size, Qt.KeepAspectRatio, Qt.SmoothTransformation,
-        )
-        self._label.setPixmap(scaled)
-        self._label.resize(scaled.size())
-
-        hb.setValue(max(0, min(hb.maximum(), int(cx * ratio - vp.width() / 2))))
-        vb.setValue(max(0, min(vb.maximum(), int(cy * ratio - vp.height() / 2))))
-
-    # ------------------------------------------------------------------
-    # 鼠标滚轮无级缩放 (供 eventFilter 调用)
-    # ------------------------------------------------------------------
-
-    def _handle_wheel_zoom(self, event) -> None:
-        if self._pixmap is None:
-            return
-        dy = event.angleDelta().y()
-        if dy == 0:
-            return
-
-        old = self._scale_factor
-        factor = 1.0008 ** dy
-        self._scale_factor = max(0.05, min(20.0, self._scale_factor * factor))
-
-        vp = self._scroll_area.viewport()
-        hb = self._scroll_area.horizontalScrollBar()
-        vb = self._scroll_area.verticalScrollBar()
-
-        mouse_vp = self._scroll_area.mapFrom(self, event.position().toPoint())
-        mx = mouse_vp.x() + hb.value()
-        my = mouse_vp.y() + vb.value()
-
-        ratio = self._scale_factor / max(old, 0.001)
-        new_size = self._pixmap.size() * self._scale_factor
-        scaled = self._pixmap.scaled(
-            new_size, Qt.KeepAspectRatio, Qt.SmoothTransformation,
-        )
-        self._label.setPixmap(scaled)
-        self._label.resize(scaled.size())
-
-        hb.setValue(max(0, min(hb.maximum(), int(mx * ratio - mouse_vp.x()))))
-        vb.setValue(max(0, min(vb.maximum(), int(my * ratio - mouse_vp.y()))))
+        self._photo_widget.fit_to_window()

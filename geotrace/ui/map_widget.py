@@ -23,6 +23,7 @@ from PySide6.QtCore import Qt, QEasingCurve, QPointF, QRectF, QVariantAnimation,
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF,
 )
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
@@ -87,8 +88,8 @@ def _abbreviate(name: str) -> str:
     return name
 
 
-class _MapCanvas(QWidget):
-    """手绘地图画布 — Mercator 坐标系 + 瓦片 + 省份 + 聚类."""
+class _MapCanvas(QOpenGLWidget):
+    """手绘地图画布 — Mercator 坐标系 + 瓦片 + 省份 + 聚类 (OpenGL 加速)."""
 
     provinceClicked = Signal(str)
     hoveredChanged = Signal(str)
@@ -364,7 +365,13 @@ class _MapCanvas(QWidget):
         super().resizeEvent(event)
         self._try_compute_initial_view()
 
-    def paintEvent(self, event) -> None:
+    def initializeGL(self) -> None:
+        pass  # QPainter 自动管理 GL 状态，无需手动初始化
+
+    def resizeGL(self, w: int, h: int) -> None:
+        pass  # QPainter 投影变换在 paintGL 中处理
+
+    def paintGL(self) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
