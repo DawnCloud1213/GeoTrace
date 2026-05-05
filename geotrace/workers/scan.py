@@ -17,8 +17,8 @@ from geotrace.workers import Worker
 
 logger = logging.getLogger(__name__)
 
-# 批量提交大小
-BATCH_SIZE = 100
+# 批量提交大小 (500 = ~500KB/批次, 减少事务提交次数)
+BATCH_SIZE = 500
 
 
 class ScanWorker(Worker):
@@ -106,13 +106,15 @@ class ScanWorker(Worker):
                 self.progress.emit(processed + 1, total_in_dir)
                 self.fileProcessed.emit(os.path.basename(file_path))
 
-                # 增量检查
+                # 增量检查 (file_size + mtime 两阶段快速筛选)
                 try:
-                    mtime = os.path.getmtime(file_path)
+                    stat = os.stat(file_path)
                 except OSError:
                     continue
 
-                if not self._db.photo_needs_update(file_path, mtime):
+                if not self._db.photo_needs_update(file_path,
+                                                    stat.st_size,
+                                                    stat.st_mtime):
                     processed += 1
                     continue
 

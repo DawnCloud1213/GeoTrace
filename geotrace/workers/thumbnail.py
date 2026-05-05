@@ -39,9 +39,14 @@ def get_thumbnail_cache_dir() -> Path:
 
 
 def thumbnail_key(file_path: str) -> str:
-    """对文件路径取 MD5 前 16 位作为缓存键."""
+    """对文件路径取 MD5 前 16 位作为缓存键.
+
+    返回三级哈希分片路径: ab/cd/ef{rest}.jpg
+    每级目录最多 256 个条目，避免单目录文件数爆炸。
+    """
     import hashlib
-    return hashlib.md5(file_path.encode("utf-8")).hexdigest()[:16]
+    h = hashlib.md5(file_path.encode("utf-8")).hexdigest()[:16]
+    return f"{h[0:2]}/{h[2:4]}/{h[4:]}.jpg"
 
 
 class ThumbnailWorker(Worker):
@@ -119,7 +124,10 @@ class ThumbnailWorker(Worker):
         """
         try:
             key = thumbnail_key(file_path)
-            output_path = self._cache_dir / f"{key}.jpg"
+            output_path = self._cache_dir / key
+
+            # 确保哈希分片子目录存在
+            output_path.parent.mkdir(parents=True, exist_ok=True)
 
             # 如果已存在且比原图新, 跳过
             if output_path.exists():

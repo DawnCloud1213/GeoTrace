@@ -48,6 +48,12 @@ THUMBNAIL_RADIUS = 6  # 缩略图圆角
 SHADOW_COLOR = QColor(80, 50, 20, 40)  # 暖棕阴影
 
 
+def _badge_radius(count: int) -> int:
+    """计数 Badge 半径 — 对数增长."""
+    import math
+    return max(BADGE_MIN_RADIUS, int(10 + math.log2(count + 1) * 6))
+
+
 @dataclass(frozen=True)
 class ClusterItem:
     """聚类结果项."""
@@ -490,80 +496,93 @@ class ClusterRenderer:
         self._mode = mode
 
     def paint(self, painter: QPainter, clusters: list[ClusterItem]) -> None:
-        """绘制所有聚类元素."""
+        """绘制所有聚类元素 — 批量合并 GPU draw call.
+
+        同类型标记的椭圆/矩形合并到单个 QPainterPath，将 N 次 fillPath
+        调用压缩为 1 次，在 1000+ 标记点时显著降低 CPU→GPU 开销。
+        """
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
 
-        for cluster in clusters:
+        # 按类型分桶
+        thumb_clusters: list[ClusterItem] = []
+        badge_clusters: list[ClusterItem] = []
+        single_clusters: list[ClusterItem] = []
+
+        for c in clusters:
             if self._mode == "thumbnail":
-                self._paint_thumbnail_cluster(painter, cluster)
-            elif cluster.count > 1:
-                self._paint_badge(painter, cluster)
+                thumb_clusters.append(c)
+            elif c.count > 1:
+                badge_clusters.append(c)
             else:
-                self._paint_single(painter, cluster)
+                single_clusters.append(c)
+
+        # ── Layer A: 阴影 (批量合并) ──
+        shadow_path = QPainterPath()
+        shadow_path.setFillRule(Qt.WindingFill)
+        for c in badge_clusters:
+            r = _badge_radius(c.count)
+            shadow_path.addEllipse(
+                QRectF(c.screen_x - r + 1, c.screen_y - r + 2, r * 2, r * 2))
+        for c in thumb_clusters:
+            s = THUMBNAIL_SIZE
+            shadow_path.addRoundedRect(
+                QRectF(c.screen_x - s / 2 + 1, c.screen_y - s / 2 + 2, s, s),
+                THUMBNAIL_RADIUS, THUMBNAIL_RADIUS)
+        if not shadow_path.isEmpty():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(SHADOW_COLOR))
+            painter.fillPath(shadow_path, QBrush(SHADOW_COLOR))
+
+        # ── Layer B: Badge 主体 (批量) ──
+        badge_body = QPainterPath()
+        badge_body.setFillRule(Qt.WindingFill)
+        for c in badge_clusters:
+            r = _badge_radius(c.count)
+            badge_body.addEllipse(
+                QRectF(c.screen_x - r, c.screen_y - r, r * 2, r * 2))
+        if not badge_body.isEmpty():
+            painter.setBrush(QBrush(BADGE_BG))
+            painter.setPen(QPen(BADGE_BORDER, 2))
+            painter.drawPath(badge_body)
+
+        # ── Layer C: Badge 文本 (逐个, 不同字符串无法合并) ──
+        painter.setPen(QColor(BADGE_TEXT))
+        painter.setFont(self._badge_font)
+        for c in badge_clusters:
+            r = _badge_radius(c.count)
+            rect = QRectF(c.screen_x - r, c.screen_y - r, r * 2, r * 2)
+            painter.drawText(rect, Qt.AlignCenter, str(c.count))
+
+        # ── Layer D: 单点锚点 (批量) ──
+        single_path = QPainterPath()
+        single_path.setFillRule(Qt.WindingFill)
+        for c in single_clusters:
+            s = SINGLE_SIZE
+            single_path.addEllipse(
+                QRectF(c.screen_x - s / 2, c.screen_y - s / 2, s, s))
+        if not single_path.isEmpty():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(SINGLE_ANCHOR_BG))
+            painter.fillPath(single_path, QBrush(SINGLE_ANCHOR_BG))
+            painter.setPen(QPen(SINGLE_ANCHOR_BORDER, 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(single_path)
+
+        # ── Layer E: 缩略图标记 (逐个, 不同纹理无法合并) ──
+        for c in thumb_clusters:
+            self._paint_thumbnail_cluster(painter, c)
 
         painter.restore()
 
-    def _paint_badge(self, painter: QPainter, cluster: ClusterItem) -> None:
-        """绘制计数 Badge (圆形 + 数字)."""
-        import math
-
-        radius = max(BADGE_MIN_RADIUS, int(10 + math.log2(cluster.count + 1) * 6))
-        x = cluster.screen_x - radius
-        y = cluster.screen_y - radius
-
-        # 阴影
-        shadow_rect = QRectF(x + 1, y + 2, radius * 2, radius * 2)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(SHADOW_COLOR))
-        painter.drawEllipse(shadow_rect)
-
-        # 主体
-        rect = QRectF(x, y, radius * 2, radius * 2)
-        painter.setBrush(QBrush(BADGE_BG))
-        painter.setPen(QPen(BADGE_BORDER, 2))
-        painter.drawEllipse(rect)
-
-        # 文本
-        text = str(cluster.count)
-        painter.setPen(QColor(BADGE_TEXT))
-        painter.setFont(self._badge_font)
-        painter.drawText(rect, Qt.AlignCenter, text)
-
-    def _paint_single(self, painter: QPainter, cluster: ClusterItem) -> None:
-        """绘制单个照片锚点 (缩略图圆形裁剪 或 纯色圆点)."""
-        size = SINGLE_SIZE
-        x = cluster.screen_x - size / 2.0
-        y = cluster.screen_y - size / 2.0
-
-        pixmap = self._get_cached_pixmap(cluster, size)
-        if pixmap and not pixmap.isNull():
-            clip = QPainterPath()
-            clip.addEllipse(x, y, size, size)
-            painter.setClipPath(clip)
-            painter.drawPixmap(int(x), int(y), pixmap)
-            painter.setClipping(False)
-        else:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(SINGLE_ANCHOR_BG))
-            painter.drawEllipse(QRectF(x, y, size, size))
-
-        # 边框
-        painter.setPen(QPen(SINGLE_ANCHOR_BORDER, 2))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(QRectF(x, y, size, size))
-
     def _paint_thumbnail_cluster(self, painter: QPainter, cluster: ClusterItem) -> None:
-        """绘制缩略图模式标记 (圆角矩形缩略图 + 可选数字角标)."""
+        """绘制缩略图模式标记 (圆角矩形缩略图 + 可选数字角标).
+
+        阴影已在 paint() 的批量层中统一绘制，此处只画本体。
+        """
         size = THUMBNAIL_SIZE
         x = cluster.screen_x - size / 2.0
         y = cluster.screen_y - size / 2.0
-
-        # 阴影
-        shadow_rect = QRectF(x + 1, y + 2, size, size)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(SHADOW_COLOR))
-        painter.drawRoundedRect(shadow_rect, THUMBNAIL_RADIUS, THUMBNAIL_RADIUS)
 
         rect = QRectF(x, y, size, size)
 

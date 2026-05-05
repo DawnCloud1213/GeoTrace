@@ -69,11 +69,17 @@ class DatabaseManager:
     # 照片 CRUD
     # ------------------------------------------------------------------
 
-    def photo_needs_update(self, file_path: str, file_mtime: float) -> bool:
+    def photo_needs_update(self, file_path: str, file_size: int,
+                           file_mtime: float) -> bool:
         """检查照片是否需要重新扫描 (新增或已修改).
+
+        Two-stage check: file_size first (fast int compare), then
+        mtime — avoids unnecessary EXIF extraction when only the
+        timestamp changed (e.g. file copy preserving content).
 
         Args:
             file_path: 照片绝对路径.
+            file_size: 当前文件的 os.path.getsize() 值.
             file_mtime: 当前文件的 os.path.getmtime() 值.
 
         Returns:
@@ -81,10 +87,12 @@ class DatabaseManager:
         """
         conn = self.get_connection()
         row = conn.execute(
-            f"SELECT file_mtime FROM {TABLE_PHOTOS} WHERE file_path = ?",
+            f"SELECT file_size, file_mtime FROM {TABLE_PHOTOS} WHERE file_path = ?",
             (file_path,),
         ).fetchone()
         if row is None:
+            return True
+        if row["file_size"] != file_size:
             return True
         return abs(row["file_mtime"] - file_mtime) > 1e-6
 

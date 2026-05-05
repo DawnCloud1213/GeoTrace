@@ -115,7 +115,9 @@ class Metrics:
     PADDING_MD = 12
     PADDING_LG = 16
     SHADOW_BLUR = 12
+    SHADOW_BLUR_LIQUID = 32
     SHADOW_OFFSET = (0, 2)
+    SHADOW_OFFSET_LIQUID = (0, 8)
     PANEL_WIDTH_MIN = 180
     PANEL_WIDTH_MAX = 220
     MAP_BTN_SIZE = 36
@@ -411,6 +413,17 @@ def card_shadow_effect():
     shadow.setXOffset(0)
     shadow.setYOffset(1)
     shadow.setColor(QColor(80, 50, 20, 30))
+    return shadow
+
+
+def liquid_glass_shadow_effect():
+    """液态玻璃面板投影 — 大半径柔和阴影营造深度感."""
+    from PySide6.QtWidgets import QGraphicsDropShadowEffect
+    shadow = QGraphicsDropShadowEffect()
+    shadow.setBlurRadius(Metrics.SHADOW_BLUR_LIQUID)
+    shadow.setXOffset(Metrics.SHADOW_OFFSET_LIQUID[0])
+    shadow.setYOffset(Metrics.SHADOW_OFFSET_LIQUID[1])
+    shadow.setColor(QColor(0, 0, 0, 25))
     return shadow
 
 
