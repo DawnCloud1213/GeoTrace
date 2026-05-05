@@ -64,7 +64,7 @@ REGULAR = MaterialTier(
     shadow_blur=32,
     shadow_offset_y=8,
     noise_total=0.012,
-    refraction=0.08,
+    refraction=0.10,
 )
 """Regular true-tone glass -- primary sidebars: fiber-optic edge dispersion, 99% clear center."""
 

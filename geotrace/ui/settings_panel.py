@@ -1,7 +1,7 @@
 """右侧设置面板 — 浮动覆盖在地图上, 真实毛玻璃背板."""
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QCheckBox,
@@ -293,15 +293,39 @@ class SettingsPanel(QFrame):
         self._schedule_backdrop_capture()
         self.update()
 
+    def apply_live_backdrop(self, raw_pixmap: QPixmap,
+                            target_size: "QSize") -> None:
+        """Apply Liquid Glass refraction to a shared raw backdrop capture."""
+        import time
+        if self.isHidden() or self._blur_capture is None:
+            return
+        if not hasattr(self, '_gpu_time_start'):
+            self._gpu_time_start = time.monotonic()
+        self._blur_capture._time_sec = time.monotonic() - self._gpu_time_start
+        result = self._blur_capture.refract_raw(
+            raw_pixmap, live=True, target_size=target_size)
+        if result and not result.isNull():
+            self._blur_capture._cached_pixmap = result
+            self._blur_capture._cached_geo = self.geometry()
+            self.update()
+
     def request_backdrop_refresh(self) -> None:
         """外部请求刷新毛玻璃背景（拖拽/缩放后防抖调用）."""
         self._schedule_backdrop_capture()
 
     def request_backdrop_live(self) -> None:
-        """Real-time Liquid Glass refresh — every frame during drag/zoom."""
+        """Real-time Liquid Glass refresh — every other frame during drag/zoom."""
         import time
         if self.isHidden() or self._blur_capture is None:
             return
+
+        # Frame skip: refresh every 2nd frame (~30 fps effective)
+        if not hasattr(self, '_live_frame'):
+            self._live_frame = 0
+        self._live_frame += 1
+        if self._live_frame % 2 == 0:
+            return
+
         self._live_capturing = True
         try:
             if not hasattr(self, '_gpu_time_start'):

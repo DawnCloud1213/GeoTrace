@@ -8,7 +8,7 @@ Strategy C: Specular highlight + directional border + adaptive tint for realism
 import logging
 import random
 
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import (
     QColor, QImage, QOffscreenSurface, QOpenGLContext, QPainter, QPixmap,
     QSurfaceFormat,
@@ -86,8 +86,6 @@ _LIQUID_GLASS_FS = b"""#version 330 core
 in vec2 vTexCoord;
 out vec4 fragColor;
 uniform sampler2D uTexture;
-uniform float uRefraction;
-uniform float uHighlightIntensity;
 uniform float uTime;
 uniform vec2 uPanelSize;
 uniform float uCornerRadius;
@@ -95,15 +93,13 @@ uniform float uCornerRadius;
 void main() {
     vec2 uv = vTexCoord;
 
-    // -- Rectangular edge zone: center 80%w x 80%h = clear passthrough --
-    // margin: 0 at center, 1 at panel edges. Uses max(x,y) so the edge
-    // zone is a uniform border around all four sides of the rectangle.
+    // -- Rectangular edge zone: center 55% = clear, outer 45% = glass --
     float mx = abs(uv.x - 0.5) * 2.0;
     float my = abs(uv.y - 0.5) * 2.0;
     float margin = max(mx, my);
-    float edgeZone = smoothstep(0.80, 1.0, margin);
+    float edgeZone = smoothstep(0.55, 1.0, margin);
 
-    // -- Fiber-optic dispersion direction: outward from nearest edge --
+    // -- Dispersion direction: outward from nearest edge --
     vec2 edgeDir;
     if (mx > my) {
         edgeDir = vec2(sign(uv.x - 0.5), 0.0);
@@ -111,25 +107,34 @@ void main() {
         edgeDir = vec2(0.0, sign(uv.y - 0.5));
     }
 
-    // -- RGB chromatic dispersion (prism-like color fringe at edges) --
-    // R channel: refracts less (long wavelength)
-    // B channel: refracts more (short wavelength)
-    // G channel: stays at original sample
-    float dispersion = uRefraction * 1.5 * edgeZone;
+    // -- 1. Spatial refractive warping --
+    // 0.30 UV at full edge zone: visible distortion without being extreme.
+    float warp = 0.30 * edgeZone * margin * margin;
+    warp += sin(uv.y * 35.0 + uTime * 0.3) * 0.012 * edgeZone;
+    vec2 warpedUV = uv + edgeDir * warp;
 
-    vec4 col = texture(uTexture, uv);
-    float r = texture(uTexture, uv + edgeDir * dispersion * 0.35).r;
-    float b = texture(uTexture, uv - edgeDir * dispersion * 0.8).b;
+    // -- 2. Sample at warped position (geometric distortion) --
+    vec4 col = texture(uTexture, warpedUV);
 
-    col.r = mix(col.r, r, edgeZone * 0.8);
-    col.b = mix(col.b, b, edgeZone * 0.8);
+    // -- 3. Chromatic aberration on warped base --
+    float chroma = edgeZone * 0.20;
+    float r = texture(uTexture, warpedUV + edgeDir * chroma).r;
+    float b = texture(uTexture, warpedUV - edgeDir * chroma * 1.4).b;
+    col.r = mix(col.r, r, edgeZone * 0.7);
+    col.b = mix(col.b, b, edgeZone * 0.7);
 
-    // -- Edge glass-thickness shadow (6% at extreme outer edge) --
-    col.rgb *= 1.0 - smoothstep(0.85, 1.0, margin) * 0.06;
+    // -- 4. Edge glass-thickness shadow --
+    float thickness = smoothstep(0.75, 1.0, margin) * edgeZone * 0.10;
+    col.rgb *= 1.0 - thickness;
 
-    // -- Barely-there specular sheen at edges only --
-    float sheen = smoothstep(0.85, 1.0, margin) * 0.04 * uHighlightIntensity;
-    col.rgb += vec3(1.0, 1.0, 1.0) * sheen;
+    // -- 5. Cool rim glow --
+    float rimGlow = smoothstep(0.85, 1.0, margin) * 0.03;
+    col.rgb += vec3(0.85, 0.92, 1.0) * rimGlow;
+
+    // -- 6. Warm specular highlight --
+    float spec = smoothstep(0.78, 0.94, margin) * 0.015;
+    float dir = 0.5 + 0.5 * dot(normalize(uv - 0.5 + 0.001), normalize(vec2(-0.7, -0.7)));
+    col.rgb += vec3(1.0, 0.97, 0.92) * (spec * dir);
 
     fragColor = col;
 }
@@ -189,12 +194,15 @@ class _GpuBlurEngine:
             self._loc_down_tex = self._prog_down.uniformLocation(b"uTexture")
             self._loc_down_htexel = self._prog_down.uniformLocation(b"uHalfTexel")
             self._prog_up = QOpenGLShaderProgram()
-            self._prog_up.addShaderFromSourceCode(QOpenGLShader.Vertex, _BLUR_VS)
-            self._prog_up.addShaderFromSourceCode(QOpenGLShader.Fragment, _LIQUID_GLASS_FS)
+            vs_ok = self._prog_up.addShaderFromSourceCode(QOpenGLShader.Vertex, _BLUR_VS)
+            fs_ok = self._prog_up.addShaderFromSourceCode(QOpenGLShader.Fragment, _LIQUID_GLASS_FS)
+            if not vs_ok or not fs_ok:
+                logger.warning("Liquid Glass shader compile issue: vs=%s fs=%s log=%s",
+                              vs_ok, fs_ok, self._prog_up.log())
             self._prog_up.link()
+            if not self._prog_up.isLinked():
+                logger.warning("Liquid Glass shader link failed: %s", self._prog_up.log())
             self._loc_up_tex = self._prog_up.uniformLocation(b"uTexture")
-            self._loc_up_refraction = self._prog_up.uniformLocation(b"uRefraction")
-            self._loc_up_highlight = self._prog_up.uniformLocation(b"uHighlightIntensity")
             self._loc_up_time = self._prog_up.uniformLocation(b"uTime")
             self._loc_up_panel_size = self._prog_up.uniformLocation(b"uPanelSize")
             self._loc_up_corner_radius = self._prog_up.uniformLocation(b"uCornerRadius")
@@ -464,8 +472,6 @@ void main() { fragColor = textureLod(uTexture, vTexCoord, uLod); }
             gl.glActiveTexture(_GL_TEXTURE0)
             self._input_tex.bind()
             self._prog_up.setUniformValue(self._loc_up_tex, 0)
-            self._prog_up.setUniformValue(self._loc_up_refraction, refraction)
-            self._prog_up.setUniformValue(self._loc_up_highlight, highlight_intensity)
             self._prog_up.setUniformValue(self._loc_up_time, time_sec)
             self._prog_up.setUniformValue(self._loc_up_panel_size,
                                            float(w), float(h))
@@ -710,14 +716,36 @@ class BackdropBlurCapture:
                     cropped = self._capture_sub_region(gl_widget, gl_source)
                     if cropped is not None and not cropped.isNull():
                         engine = _GpuBlurEngine()
+
+                        # Live path: downsample 2x for 4x fewer shader pixels
+                        if live and self._downsample > 1:
+                            d = self._downsample
+                            small_w = max(1, cropped.width() // d)
+                            small_h = max(1, cropped.height() // d)
+                            shader_input = cropped.scaled(
+                                small_w, small_h,
+                                Qt.IgnoreAspectRatio,
+                                Qt.SmoothTransformation,
+                            )
+                        else:
+                            shader_input = cropped
+                            small_w, small_h = cropped.width(), cropped.height()
+
                         result = engine.refract(
-                            input_pixmap=cropped,
+                            input_pixmap=shader_input,
                             refraction=self._refraction,
                             highlight_intensity=self._highlight_intensity,
                             corner_radius=self._corner_radius,
                             time_sec=self._time_sec,
                         )
                         if result is not None and not result.isNull():
+                            # Upsample live result back to panel resolution
+                            if live and self._downsample > 1:
+                                result = result.scaled(
+                                    geo.width(), geo.height(),
+                                    Qt.IgnoreAspectRatio,
+                                    Qt.SmoothTransformation,
+                                )
                             if not live:
                                 self._cached_pixmap = result
                                 self._cached_geo = geo
@@ -733,6 +761,40 @@ class BackdropBlurCapture:
         ensures every frame gets a fresh capture.
         """
         return self.capture(live=True)
+
+    def refract_raw(self, raw_pixmap: QPixmap, live: bool = False,
+                    target_size: QSize | None = None) -> QPixmap | None:
+        """Apply Liquid Glass refraction to a pre-captured raw backdrop.
+
+        Used by main_window for shared capture: one grabFramebuffer
+        serves both sidebars instead of two independent captures.
+        """
+        geo = self._child.geometry()
+        if live and self._downsample > 1:
+            d = self._downsample
+            small_w = max(1, raw_pixmap.width() // d)
+            small_h = max(1, raw_pixmap.height() // d)
+            shader_input = raw_pixmap.scaled(
+                small_w, small_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        else:
+            shader_input = raw_pixmap
+
+        engine = _GpuBlurEngine()
+        result = engine.refract(
+            input_pixmap=shader_input,
+            refraction=self._refraction,
+            highlight_intensity=self._highlight_intensity,
+            corner_radius=self._corner_radius,
+            time_sec=self._time_sec,
+        )
+        if result is None or result.isNull():
+            return None
+
+        if live and self._downsample > 1 and target_size is not None:
+            result = result.scaled(
+                target_size.width(), target_size.height(),
+                Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        return result
 
     def invalidate(self) -> None:
         self._cached_pixmap = None

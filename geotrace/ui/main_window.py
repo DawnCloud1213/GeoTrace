@@ -361,13 +361,101 @@ class MainWindow(QMainWindow):
     def _on_view_changed(self) -> None:
         """Map drag/zoom — real-time Liquid Glass refresh every frame.
 
-        The GPU composite pipeline runs in ~1ms at panel resolution,
-        so a single path serves both real-time and final quality.
+        When both floating panels are visible, one grabFramebuffer read
+        serves both — halving the GPU→CPU bandwidth per frame.
         """
-        if self._settings_panel.isVisible():
-            self._settings_panel.request_backdrop_live()
-        if self._floating_sidebar.isVisible():
-            self._floating_sidebar.request_backdrop_live()
+        side_vis = self._floating_sidebar.isVisible()
+        sett_vis = self._settings_panel.isVisible()
+
+        if side_vis and sett_vis:
+            self._capture_shared_live_backdrop()
+        else:
+            if sett_vis:
+                self._settings_panel.request_backdrop_live()
+            if side_vis:
+                self._floating_sidebar.request_backdrop_live()
+
+    def _capture_shared_live_backdrop(self) -> None:
+        """One grabFramebuffer → crop → refract for both floating panels.
+
+        Normalises the DPR-scaled framebuffer capture to widget pixels
+        so that crop rects (which are in widget coords) align correctly.
+        """
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtCore import QPoint, QRect, QSize
+
+        canvas = self._map_view._canvas
+        if not canvas or not canvas.isVisible():
+            return
+
+        side = self._floating_sidebar
+        sett = self._settings_panel
+
+        # Frame skip: shared path also skips every other frame
+        if not hasattr(self, '_shared_live_frame'):
+            self._shared_live_frame = 0
+        self._shared_live_frame += 1
+        if self._shared_live_frame % 2 == 0:
+            return
+
+        # Union rect in map_widget coords
+        side_geo = side.geometry()
+        sett_geo = sett.geometry()
+        union = side_geo.united(sett_geo)
+        if union.isEmpty():
+            return
+
+        # Map union to GL widget coords
+        gl_offset = canvas.mapFrom(self._map_view, QPoint(0, 0))
+        gl_union = QRect(union.topLeft() + gl_offset, union.size())
+        gl_union = gl_union.intersected(canvas.rect())
+        if gl_union.isEmpty():
+            return
+
+        # One framebuffer grab for the union region
+        try:
+            canvas.makeCurrent()
+            fb = canvas.grabFramebuffer()
+            canvas.doneCurrent()
+        except Exception:
+            return
+
+        if fb.isNull():
+            return
+
+        fb = fb.mirrored(False, True)  # GL origin → image origin
+        dpr = fb.devicePixelRatioF() or 1.0
+
+        # Crop at framebuffer (DPR) resolution, then normalise to widget px
+        if dpr != 1.0:
+            fb_src = QRect(
+                int(gl_union.x() * dpr), int(gl_union.y() * dpr),
+                int(gl_union.width() * dpr), int(gl_union.height() * dpr))
+            raw = QPixmap.fromImage(fb.copy(fb_src))
+            # Scale to widget pixels so crop rects match
+            raw = raw.scaled(gl_union.size(),
+                             Qt.IgnoreAspectRatio,
+                             Qt.SmoothTransformation)
+        else:
+            raw = QPixmap.fromImage(fb.copy(gl_union))
+
+        if raw.isNull():
+            return
+
+        # Crop & deliver to each panel (all coords now in widget pixels)
+        # -- Sidebar (left panel) --
+        side_src = QRect(
+            side_geo.topLeft() - union.topLeft(), side_geo.size())
+        side_crop = raw.copy(side_src.intersected(raw.rect()))
+        if not side_crop.isNull():
+            side.apply_live_backdrop(side_crop, side_geo.size())
+
+        # -- Settings panel (right panel) --
+        sett_src = QRect(
+            sett_geo.topLeft() - union.topLeft(), sett_geo.size())
+        sett_crop = raw.copy(sett_src.intersected(raw.rect()))
+        if not sett_crop.isNull():
+            sett.apply_live_backdrop(sett_crop, sett_geo.size())
 
     @Slot(int)
     def _on_frosted_alpha_changed(self, value: int) -> None:
