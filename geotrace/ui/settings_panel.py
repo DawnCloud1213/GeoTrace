@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
 from geotrace.ui.blur_engine import (
     BackdropBlurCapture,
     FrostedSurfacePainter,
-    generate_noise_pixmap_multiscale,
 )
+from geotrace.ui.material import THIN
 from geotrace.ui.theme import Colors, Fonts, Metrics
 
 
@@ -42,15 +42,12 @@ class SettingsPanel(QFrame):
         self.setMaximumWidth(250)
 
         # ── 毛玻璃引擎 ──
-        self._frosted_alpha: float = 0.63
+        self._tier = THIN
+        self._frosted_alpha: float = self._tier.tint_alpha
         self._blur_capture: BackdropBlurCapture | None = None
         self._capture_pending = False
-        self._noise_pixmap = generate_noise_pixmap_multiscale(250, 500)
-        self._frosted_painter = FrostedSurfacePainter(
-            tint_color=QColor(255, 255, 255, int(self._frosted_alpha * 255)),
-            border_color=QColor(Colors.FROSTED_TINT_R, Colors.FROSTED_TINT_G, Colors.FROSTED_TINT_B, 40),
-            border_radius=float(Metrics.BORDER_RADIUS_MD),
-        )
+        self._live_capturing = False
+        self._frosted_painter = FrostedSurfacePainter.from_tier(self._tier)
 
         # 覆盖 GLOBAL_QSS 的白色背景 — 毛玻璃由 paintEvent 渲染
         self.setStyleSheet(
@@ -167,13 +164,13 @@ class SettingsPanel(QFrame):
 
         self._alpha_slider = QSlider(Qt.Horizontal)
         self._alpha_slider.setRange(30, 100)
-        self._alpha_slider.setValue(63)
+        self._alpha_slider.setValue(100)
         self._alpha_slider.setTickPosition(QSlider.TicksBelow)
         self._alpha_slider.setTickInterval(10)
         self._alpha_slider.valueChanged.connect(self.frostedAlphaChanged.emit)
         slider_row.addWidget(self._alpha_slider)
 
-        self._alpha_value_label = QLabel("63%")
+        self._alpha_value_label = QLabel("100%")
         self._alpha_value_label.setFixedWidth(36)
         self._alpha_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._alpha_value_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
@@ -191,13 +188,27 @@ class SettingsPanel(QFrame):
     # ------------------------------------------------------------------
 
     def showEvent(self, event) -> None:
-        """首次显示时初始化模糊捕获引擎 & 异步抓取背景."""
+        """首次显示时初始化模糊捕获引擎."""
         super().showEvent(event)
         if self.parent() and not self._blur_capture:
-            self._blur_capture = BackdropBlurCapture(
-                self, blur_radius=25, capture_target=self.parent()
+            self._blur_capture = BackdropBlurCapture.from_tier(
+                self, self._tier, capture_target=self.parent()
             )
-        self._schedule_backdrop_capture()
+        # 初始截图由外部调用 capture_backdrop_now() 触发
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        if self._blur_capture:
+            self._blur_capture.invalidate()
+        if not self._live_capturing:
+            self._schedule_backdrop_capture()
+
+    def capture_backdrop_now(self) -> None:
+        """同步抓取背景 — 由滑入动画完成信号触发."""
+        if self._blur_capture and not self.isHidden():
+            self._blur_capture.invalidate()
+            self._blur_capture.capture()
+            self.update()
 
     def paintEvent(self, event) -> None:
         """渲染毛玻璃背板: 模糊背景(如有缓存) → 着色 → 噪点 → 边框.
@@ -219,8 +230,7 @@ class SettingsPanel(QFrame):
                     backdrop = self._blur_capture._cached_pixmap
 
         tint_alpha = int(self._frosted_alpha * 255)
-        self._frosted_painter.tint = QColor(255, 255, 255, tint_alpha)
-        self._frosted_painter.noise = self._noise_pixmap
+        self._frosted_painter.tint = QColor(255, 250, 242, tint_alpha)
         self._frosted_painter.paint(painter, self.rect(), backdrop)
 
         painter.end()
@@ -231,7 +241,7 @@ class SettingsPanel(QFrame):
 
         合并式刷新：同时最多只有一次待处理的捕获。
         """
-        if self.isHidden() or self._capture_pending:
+        if self.isHidden() or self._capture_pending or self._live_capturing:
             return
 
         self._capture_pending = True
@@ -239,8 +249,11 @@ class SettingsPanel(QFrame):
         def _capture() -> None:
             self._capture_pending = False
             if self._blur_capture is not None and not self.isHidden():
-                self._blur_capture.invalidate()
+                saved = self._blur_capture._cached_geo
+                self._blur_capture._cached_geo = None
                 self._blur_capture.capture()
+                if self._blur_capture._cached_pixmap is None:
+                    self._blur_capture._cached_geo = saved
                 self.update()
 
         QTimer.singleShot(0, _capture)
@@ -250,15 +263,8 @@ class SettingsPanel(QFrame):
         super().resizeEvent(event)
         if self._blur_capture:
             self._blur_capture.invalidate()
-        w, h = self.width(), self.height()
-        if w > 0 and h > 0:
-            noise_total = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap_multiscale(
-                w, h,
-                fine_opacity=noise_total * 0.625,
-                coarse_opacity=noise_total * 0.375,
-            )
-        self._schedule_backdrop_capture()
+        if not self._live_capturing:
+            self._schedule_backdrop_capture()
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -284,20 +290,30 @@ class SettingsPanel(QFrame):
         self._frosted_alpha = max(0.0, min(1.0, alpha))
         if self._blur_capture:
             self._blur_capture.invalidate()
-        w, h = self.width(), self.height()
-        if w > 0 and h > 0:
-            noise_total = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap_multiscale(
-                w, h,
-                fine_opacity=noise_total * 0.625,
-                coarse_opacity=noise_total * 0.375,
-            )
         self._schedule_backdrop_capture()
         self.update()
 
     def request_backdrop_refresh(self) -> None:
         """外部请求刷新毛玻璃背景（拖拽/缩放后防抖调用）."""
         self._schedule_backdrop_capture()
+
+    def request_backdrop_live(self) -> None:
+        """Real-time Liquid Glass refresh — every frame during drag/zoom."""
+        import time
+        if self.isHidden() or self._blur_capture is None:
+            return
+        self._live_capturing = True
+        try:
+            if not hasattr(self, '_gpu_time_start'):
+                self._gpu_time_start = time.monotonic()
+            self._blur_capture._time_sec = time.monotonic() - self._gpu_time_start
+            backdrop = self._blur_capture.capture_live()
+            if backdrop and not backdrop.isNull():
+                self._blur_capture._cached_pixmap = backdrop
+                self._blur_capture._cached_geo = self.geometry()
+                self.update()
+        finally:
+            self._live_capturing = False
 
     # ------------------------------------------------------------------
     # 内部回调

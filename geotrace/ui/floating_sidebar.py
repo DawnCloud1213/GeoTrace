@@ -1,7 +1,7 @@
 """左侧浮动侧边栏 — 毛玻璃 + 分段控件(省份/照片切换)."""
 
 from PySide6.QtCore import Qt, QTimer, QRect, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -17,8 +17,8 @@ from geotrace.database.manager import DatabaseManager
 from geotrace.ui.blur_engine import (
     BackdropBlurCapture,
     FrostedSurfacePainter,
-    generate_noise_pixmap_multiscale,
 )
+from geotrace.ui.material import REGULAR
 from geotrace.ui.photo_grid import PhotoGrid
 from geotrace.ui.province_list import ProvinceListPanel
 from geotrace.ui.theme import Colors, Fonts, Metrics
@@ -40,10 +40,11 @@ class FloatingSidebar(QFrame):
         self.setMaximumWidth(500)
 
         # ── 毛玻璃引擎 ──
-        self._frosted_alpha: float = 0.63
+        self._tier = REGULAR
+        self._frosted_alpha: float = self._tier.tint_alpha
         self._blur_capture: BackdropBlurCapture | None = None
         self._capture_pending = False
-        self._noise_pixmap = None
+        self._live_capturing = False
         self._frosted_painter = None
 
         self.setStyleSheet(
@@ -195,6 +196,7 @@ class FloatingSidebar(QFrame):
                     dx = event.globalPosition().x() - self._resize_start_x
                     new_w = max(260, min(500, self._resize_start_w + dx))
                     self.setFixedWidth(new_w)
+                    self.resize(new_w, self.height())
                     self._invalidate_blur()
                     return True
             elif et == event.Type.MouseButtonRelease:
@@ -288,23 +290,30 @@ class FloatingSidebar(QFrame):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self.parent() and not self._blur_capture:
-            self._blur_capture = BackdropBlurCapture(
-                self, blur_radius=25, capture_target=self.parent()
+            self._blur_capture = BackdropBlurCapture.from_tier(
+                self, self._tier, capture_target=self.parent()
             )
         self._init_frosted_painter()
-        self._schedule_backdrop_capture()
+        # 初始截图由外部调用 capture_backdrop_now() 触发，
+        # 避免在滑入动画完成前截图到错误位置
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        if self._blur_capture:
+            self._blur_capture.invalidate()
+        if not self._live_capturing:
+            self._schedule_backdrop_capture()
+
+    def capture_backdrop_now(self) -> None:
+        """同步抓取背景 — 由滑入动画完成信号触发."""
+        if self._blur_capture and not self.isHidden():
+            self._blur_capture.invalidate()
+            self._blur_capture.capture()
+            self.update()
 
     def _init_frosted_painter(self) -> None:
         if self._frosted_painter is None:
-            self._frosted_painter = FrostedSurfacePainter(
-                tint_color=QColor(255, 255, 255, int(self._frosted_alpha * 255)),
-                border_color=QColor(Colors.FROSTED_TINT_R, Colors.FROSTED_TINT_G,
-                                    Colors.FROSTED_TINT_B, 40),
-                border_radius=float(Metrics.BORDER_RADIUS_MD),
-            )
-        w, h = self.width(), self.height()
-        if w > 0 and h > 0:
-            self._noise_pixmap = generate_noise_pixmap_multiscale(w, h)
+            self._frosted_painter = FrostedSurfacePainter.from_tier(self._tier)
 
     def paintEvent(self, event) -> None:
         """渲染毛玻璃背板 + 滑块指示器."""
@@ -326,8 +335,7 @@ class FloatingSidebar(QFrame):
             self._init_frosted_painter()
 
         tint_alpha = int(self._frosted_alpha * 255)
-        self._frosted_painter.tint = QColor(255, 255, 255, tint_alpha)
-        self._frosted_painter.noise = self._noise_pixmap
+        self._frosted_painter.tint = QColor(255, 250, 242, tint_alpha)
         self._frosted_painter.paint(painter, self.rect(), backdrop)
 
         # 滑块指示器（在内容区左上角区域绘制）
@@ -337,7 +345,7 @@ class FloatingSidebar(QFrame):
         super().paintEvent(event)
 
     def _schedule_backdrop_capture(self) -> None:
-        if self.isHidden() or self._capture_pending:
+        if self.isHidden() or self._capture_pending or self._live_capturing:
             return
 
         self._capture_pending = True
@@ -345,8 +353,12 @@ class FloatingSidebar(QFrame):
         def _capture() -> None:
             self._capture_pending = False
             if self._blur_capture is not None and not self.isHidden():
-                self._blur_capture.invalidate()
+                # Force fresh capture by bypassing geometry cache
+                saved = self._blur_capture._cached_geo
+                self._blur_capture._cached_geo = None
                 self._blur_capture.capture()
+                if self._blur_capture._cached_pixmap is None:
+                    self._blur_capture._cached_geo = saved
                 self.update()
 
         QTimer.singleShot(0, _capture)
@@ -358,14 +370,6 @@ class FloatingSidebar(QFrame):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._invalidate_blur()
-        w, h = self.width(), self.height()
-        if w > 0 and h > 0:
-            noise_total = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap_multiscale(
-                w, h,
-                fine_opacity=noise_total * 0.625,
-                coarse_opacity=noise_total * 0.375,
-            )
         self._schedule_backdrop_capture()
 
     # ------------------------------------------------------------------
@@ -376,19 +380,35 @@ class FloatingSidebar(QFrame):
         self._frosted_alpha = max(0.0, min(1.0, alpha))
         if self._blur_capture:
             self._blur_capture.invalidate()
-        w, h = self.width(), self.height()
-        if w > 0 and h > 0:
-            noise_total = 0.02 + self._frosted_alpha * 0.03
-            self._noise_pixmap = generate_noise_pixmap_multiscale(
-                w, h,
-                fine_opacity=noise_total * 0.625,
-                coarse_opacity=noise_total * 0.375,
-            )
         self._schedule_backdrop_capture()
         self.update()
 
     def request_backdrop_refresh(self) -> None:
         self._schedule_backdrop_capture()
+
+    def request_backdrop_live(self) -> None:
+        """Real-time Liquid Glass refresh — every frame during drag/zoom.
+
+        The GPU composite pipeline runs in ~1ms at panel resolution,
+        so we can sustain 60fps with no throttle. Dynamic shader effects
+        (specular highlight parallax) are driven by elapsed time.
+        """
+        import time
+        if self.isHidden() or self._blur_capture is None:
+            return
+        self._live_capturing = True
+        try:
+            # Update shader time for dynamic Liquid Glass effects
+            if not hasattr(self, '_gpu_time_start'):
+                self._gpu_time_start = time.monotonic()
+            self._blur_capture._time_sec = time.monotonic() - self._gpu_time_start
+            backdrop = self._blur_capture.capture_live()
+            if backdrop and not backdrop.isNull():
+                self._blur_capture._cached_pixmap = backdrop
+                self._blur_capture._cached_geo = self.geometry()
+                self.update()
+        finally:
+            self._live_capturing = False
 
     def switch_to_photos_tab(self) -> None:
         self._btn_photos.setChecked(True)

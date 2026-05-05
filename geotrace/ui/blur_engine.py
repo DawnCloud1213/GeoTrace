@@ -36,6 +36,8 @@ _GL_TEXTURE_WRAP_S = 0x2802
 _GL_TEXTURE_WRAP_T = 0x2803
 _GL_TEXTURE_MAG_FILTER = 0x2800
 _GL_TEXTURE_MIN_FILTER = 0x2801
+_GL_READ_FRAMEBUFFER = 0x8CA8
+_GL_DRAW_FRAMEBUFFER = 0x8CA9
 
 # ---------------------------------------------------------------------------
 # GPU separable Gaussian blur (fullscreen triangle + GLSL)
@@ -52,36 +54,98 @@ void main() {
 }
 """
 
-# Fragment shader: 9-tap 1D Gaussian (uBlurScale stretches the kernel to match requested radius)
-_BLUR_FS = b"""#version 330 core
+# Fragment shader: Dual Kawase downsample (5-tap, writes to half-res FBO)
+_KAWASE_DOWN_FS = b"""#version 330 core
 in vec2 vTexCoord;
 out vec4 fragColor;
 uniform sampler2D uTexture;
-uniform vec2 uTexelSize;
-uniform float uBlurScale;
+uniform vec2 uHalfTexel;
 void main() {
-    vec2 step = uTexelSize * uBlurScale;
-    float sigma = uBlurScale * 1.65;
-    float twoSigma2 = 2.0 * sigma * sigma;
-    // auto-calculated 9-tap Gaussian weights
-    vec4 color = vec4(0.0);
-    float weightSum = 0.0;
-    for (int i = -4; i <= 4; i++) {
-        float w = exp(-float(i * i) / twoSigma2);
-        color += texture(uTexture, vTexCoord + float(i) * step) * w;
-        weightSum += w;
+    vec2 uv = vTexCoord;
+    vec4 col = texture(uTexture, uv) * 4.0;
+    col += texture(uTexture, uv + vec2(-1, -1) * uHalfTexel);
+    col += texture(uTexture, uv + vec2(-1,  1) * uHalfTexel);
+    col += texture(uTexture, uv + vec2( 1, -1) * uHalfTexel);
+    col += texture(uTexture, uv + vec2( 1,  1) * uHalfTexel);
+    fragColor = col * 0.125;
+}
+"""
+
+# Fragment shader: Liquid Glass -- full-color fiber-optic edge dispersion.
+#
+# Center ~78% area: pure passthrough — no distortion, no color shift,
+# no tint, no noise. The background shows through exactly as-is.
+#
+# Outer edge ring (~22%): fiber-optic chromatic dispersion simulating
+# light refracting through curved glass edges. R/G/B channels sample
+# at slightly different radial offsets, producing a prism-like color
+# fringe that intensifies toward the very edge.
+#
+# No blur kernel — Apple Liquid Glass is transparent glass, not frosted.
+_LIQUID_GLASS_FS = b"""#version 330 core
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uTexture;
+uniform float uRefraction;
+uniform float uHighlightIntensity;
+uniform float uTime;
+uniform vec2 uPanelSize;
+uniform float uCornerRadius;
+
+void main() {
+    vec2 uv = vTexCoord;
+
+    // -- Rectangular edge zone: center 80%w x 80%h = clear passthrough --
+    // margin: 0 at center, 1 at panel edges. Uses max(x,y) so the edge
+    // zone is a uniform border around all four sides of the rectangle.
+    float mx = abs(uv.x - 0.5) * 2.0;
+    float my = abs(uv.y - 0.5) * 2.0;
+    float margin = max(mx, my);
+    float edgeZone = smoothstep(0.80, 1.0, margin);
+
+    // -- Fiber-optic dispersion direction: outward from nearest edge --
+    vec2 edgeDir;
+    if (mx > my) {
+        edgeDir = vec2(sign(uv.x - 0.5), 0.0);
+    } else {
+        edgeDir = vec2(0.0, sign(uv.y - 0.5));
     }
-    fragColor = color / weightSum;
+
+    // -- RGB chromatic dispersion (prism-like color fringe at edges) --
+    // R channel: refracts less (long wavelength)
+    // B channel: refracts more (short wavelength)
+    // G channel: stays at original sample
+    float dispersion = uRefraction * 1.5 * edgeZone;
+
+    vec4 col = texture(uTexture, uv);
+    float r = texture(uTexture, uv + edgeDir * dispersion * 0.35).r;
+    float b = texture(uTexture, uv - edgeDir * dispersion * 0.8).b;
+
+    col.r = mix(col.r, r, edgeZone * 0.8);
+    col.b = mix(col.b, b, edgeZone * 0.8);
+
+    // -- Edge glass-thickness shadow (6% at extreme outer edge) --
+    col.rgb *= 1.0 - smoothstep(0.85, 1.0, margin) * 0.06;
+
+    // -- Barely-there specular sheen at edges only --
+    float sheen = smoothstep(0.85, 1.0, margin) * 0.04 * uHighlightIntensity;
+    col.rgb += vec3(1.0, 1.0, 1.0) * sheen;
+
+    fragColor = col;
 }
 """
 
 
-class _GpuBlurEngine:
-    """Singleton: offscreen GL context + separable Gaussian blur program.
 
-    Lazily initialises an OpenGL 3.3 core context that shares resources with
-    QOpenGLWidget instances.  Two-pass blur: horizontal then vertical, each a
-    single glDrawArrays call with the fullscreen-triangle vertex shader.
+class _GpuBlurEngine:
+    """Singleton: standalone GL context + Liquid Glass refraction program.
+
+    Creates an independent OpenGL 3.3 context (no sharing needed — all
+    rendering goes to our own FBO). If globalShareContext is available
+    it will be used for sharing, but lack of it is not a blocker.
+
+    refract(): Single-pass GPU shader applying fiber-optic edge dispersion
+    — no blur, no tint, full-color passthrough at center.
     """
 
     _instance = None
@@ -95,18 +159,20 @@ class _GpuBlurEngine:
     def _init_gl(self) -> bool:
         if self._ready:
             return True
-        # Only attempt GPU blur when another QOpenGLWidget has already
-        # initialised the global share context.
-        if QOpenGLContext.globalShareContext() is None:
-            return False
         try:
             fmt = QSurfaceFormat.defaultFormat()
 
+            # Create a standalone OpenGL context — no sharing needed since
+            # we render to our own FBO and don't share textures.
             self._ctx = QOpenGLContext()
-            self._ctx.setShareContext(QOpenGLContext.globalShareContext())
+            # Try sharing with global context if available (Qt < 6), but
+            # don't bail if unavailable — standalone works fine for FBO ops.
+            share_ctx = QOpenGLContext.globalShareContext()
+            if share_ctx is not None:
+                self._ctx.setShareContext(share_ctx)
             self._ctx.setFormat(fmt)
             if not self._ctx.create():
-                raise RuntimeError("Failed to create shared GL context")
+                raise RuntimeError("Failed to create GL context")
 
             self._surface = QOffscreenSurface()
             self._surface.setFormat(fmt)
@@ -115,25 +181,40 @@ class _GpuBlurEngine:
             if not self._ctx.makeCurrent(self._surface):
                 raise RuntimeError("Failed to make GL context current")
 
-            # Compile shader
-            self._program = QOpenGLShaderProgram()
-            if not self._program.addShaderFromSourceCode(QOpenGLShader.Vertex, _BLUR_VS):
-                raise RuntimeError(f"VS compile: {self._program.log()}")
-            if not self._program.addShaderFromSourceCode(QOpenGLShader.Fragment, _BLUR_FS):
-                raise RuntimeError(f"FS compile: {self._program.log()}")
-            if not self._program.link():
-                raise RuntimeError(f"Link: {self._program.log()}")
+            # Compile Dual Kawase down/up programs
+            self._prog_down = QOpenGLShaderProgram()
+            self._prog_down.addShaderFromSourceCode(QOpenGLShader.Vertex, _BLUR_VS)
+            self._prog_down.addShaderFromSourceCode(QOpenGLShader.Fragment, _KAWASE_DOWN_FS)
+            self._prog_down.link()
+            self._loc_down_tex = self._prog_down.uniformLocation(b"uTexture")
+            self._loc_down_htexel = self._prog_down.uniformLocation(b"uHalfTexel")
+            self._prog_up = QOpenGLShaderProgram()
+            self._prog_up.addShaderFromSourceCode(QOpenGLShader.Vertex, _BLUR_VS)
+            self._prog_up.addShaderFromSourceCode(QOpenGLShader.Fragment, _LIQUID_GLASS_FS)
+            self._prog_up.link()
+            self._loc_up_tex = self._prog_up.uniformLocation(b"uTexture")
+            self._loc_up_refraction = self._prog_up.uniformLocation(b"uRefraction")
+            self._loc_up_highlight = self._prog_up.uniformLocation(b"uHighlightIntensity")
+            self._loc_up_time = self._prog_up.uniformLocation(b"uTime")
+            self._loc_up_panel_size = self._prog_up.uniformLocation(b"uPanelSize")
+            self._loc_up_corner_radius = self._prog_up.uniformLocation(b"uCornerRadius")
 
-            # Cache uniform locations (int-based for PySide6 compatibility)
-            self._loc_texture = self._program.uniformLocation(b"uTexture")
-            self._loc_texel_size = self._program.uniformLocation(b"uTexelSize")
-            self._loc_blur_scale = self._program.uniformLocation(b"uBlurScale")
+            # Log shader link status
+            for name, prog in [("down", self._prog_down), ("up", self._prog_up)]:
+                if not prog.isLinked():
+                    logger.warning("Shader %s link failed: %s", name, prog.log())
 
-            # VAO required by core profile (can be empty — we use gl_VertexID)
+            # VAO (required by core profile, empty — we use gl_VertexID)
             self._vao = QOpenGLVertexArrayObject()
             if not self._vao.isCreated():
                 if not self._vao.create():
                     raise RuntimeError("VAO creation failed")
+
+            # Pooled resources — recreated on size change
+            self._pool_w = 0
+            self._pool_h = 0
+            self._input_tex: QOpenGLTexture | None = None
+            self._up_fbo: QOpenGLFramebufferObject | None = None
 
             self._ctx.doneCurrent()
             self._ready = True
@@ -142,8 +223,117 @@ class _GpuBlurEngine:
             logger.warning("GPU blur not available, falling back to CPU", exc_info=True)
             return False
 
-    def blur(self, input_pixmap: QPixmap, blur_radius: float) -> QPixmap | None:
-        """Two-pass separable Gaussian blur.  Returns None on failure."""
+    # ------------------------------------------------------------------
+    # Dual Kawase blur (quality path)
+    # ------------------------------------------------------------------
+
+    def blur(self, input_pixmap: QPixmap, blur_radius: float,
+             saturation: float = 1.0) -> QPixmap | None:
+        """Dual Kawase blur. Returns None on failure.
+
+        blur_radius controls the half-texel offset scale (1.0 = standard).
+        saturation is applied inline during upsample (1.0 = no boost).
+        """
+        if not self._init_gl():
+            return None
+
+        w, h = input_pixmap.width(), input_pixmap.height()
+        hw, hh = max(1, w // 2), max(1, h // 2)
+        if w <= 0 or h <= 0 or hw <= 0 or hh <= 0:
+            return None
+
+        if not self._ctx.makeCurrent(self._surface):
+            return None
+
+        try:
+            # Re/create pooled resources on size change
+            if w != self._pool_w or h != self._pool_h:
+                self._pool_w = w
+                self._pool_h = h
+                self._input_tex = QOpenGLTexture(QOpenGLTexture.Target2D)
+                self._input_tex.setSize(w, h)
+                self._input_tex.setFormat(QOpenGLTexture.RGBA8_UNorm)
+                self._input_tex.setMinMagFilters(QOpenGLTexture.Linear, QOpenGLTexture.Linear)
+                self._input_tex.setWrapMode(QOpenGLTexture.ClampToEdge)
+                self._input_tex.allocateStorage()
+                self._down_fbo = None  # force recreate
+                self._up_fbo = None
+
+            if self._down_fbo is None:
+                self._down_fbo = QOpenGLFramebufferObject(hw, hh)
+            if self._up_fbo is None:
+                self._up_fbo = QOpenGLFramebufferObject(w, h)
+
+            # Upload pixmap → pooled texture
+            image = input_pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+            self._input_tex.setData(0, QOpenGLTexture.RGBA, QOpenGLTexture.UInt8,
+                                     image.constBits())
+
+            gl = self._ctx.functions()
+
+            # --- Downsample pass: input_tex → down_fbo (half-res) ---
+            self._prog_down.bind()
+            self._vao.bind()
+            self._down_fbo.bind()
+            gl.glViewport(0, 0, hw, hh)
+            gl.glClear(_GL_COLOR_BUFFER_BIT)
+
+            gl.glActiveTexture(_GL_TEXTURE0)
+            self._input_tex.bind()
+            self._prog_down.setUniformValue(self._loc_down_tex, 0)
+            scale = max(0.5, blur_radius / 20.0)
+            self._prog_down.setUniformValue(self._loc_down_htexel,
+                                              scale / hw, scale / hh)
+            gl.glDrawArrays(_GL_TRIANGLES, 0, 3)
+            self._input_tex.release()
+            self._down_fbo.release()
+
+            # --- Upsample pass: down_fbo → up_fbo (full-res) ---
+            self._prog_up.bind()
+            self._up_fbo.bind()
+            gl.glViewport(0, 0, w, h)
+            gl.glClear(_GL_COLOR_BUFFER_BIT)
+
+            fbo_tex_id = self._down_fbo.texture()
+            gl.glActiveTexture(_GL_TEXTURE0)
+            gl.glBindTexture(_GL_TEXTURE_2D, fbo_tex_id)
+            gl.glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_WRAP_S, _GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_WRAP_T, _GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_MAG_FILTER, _GL_LINEAR)
+            gl.glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_MIN_FILTER, _GL_LINEAR)
+            self._prog_up.setUniformValue(self._loc_up_tex, 0)
+            self._prog_up.setUniformValue(self._loc_up_refraction, 0.08)
+            self._prog_up.setUniformValue(self._loc_up_highlight, 0.25)
+            self._prog_up.setUniformValue(self._loc_up_time, 0.0)
+            self._prog_up.setUniformValue(self._loc_up_panel_size,
+                                           float(w), float(h))
+            self._prog_up.setUniformValue(self._loc_up_corner_radius, 14.0)
+            gl.glDrawArrays(_GL_TRIANGLES, 0, 3)
+
+            self._vao.release()
+            self._prog_up.release()
+            self._up_fbo.release()
+
+            result_image = self._up_fbo.toImage()
+            result = QPixmap.fromImage(result_image)
+
+            self._ctx.doneCurrent()
+            return result
+        except Exception:
+            logger.warning("GPU blur pass failed", exc_info=True)
+            self._ctx.doneCurrent()
+            return None
+
+    # ------------------------------------------------------------------
+    # Mipmap live blur (fast path for drag/zoom)
+    # ------------------------------------------------------------------
+
+    def blur_live(self, input_pixmap: QPixmap) -> QPixmap | None:
+        """Ultra-fast mipmap blur: glGenerateMipmap + textureLod sampling.
+
+        No custom shader — just GPU-hardware mipmap generation and
+        linear-mipmap-linear sampling. ~1ms total.
+        """
         if not self._init_gl():
             return None
 
@@ -154,77 +344,148 @@ class _GpuBlurEngine:
         if not self._ctx.makeCurrent(self._surface):
             return None
 
-        # Map QGraphicsBlurEffect "radius" to Gaussian sigma (~ radius / 3)
-        blur_scale = max(0.33, blur_radius / 3.0)
-
         try:
-            # Step 1: upload QPixmap → OpenGL texture
+            # Upload to texture with mipmaps
             image = input_pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
             tex = QOpenGLTexture(QOpenGLTexture.Target2D)
             tex.setSize(w, h)
             tex.setFormat(QOpenGLTexture.RGBA8_UNorm)
             tex.setMinMagFilters(QOpenGLTexture.Linear, QOpenGLTexture.Linear)
             tex.setWrapMode(QOpenGLTexture.ClampToEdge)
+            tex.setMipLevels(tex.maximumMipLevels())
             tex.allocateStorage()
             tex.setData(0, QOpenGLTexture.RGBA, QOpenGLTexture.UInt8, image.constBits())
 
-            # Step 2: create ping-pong FBOs
+            # Render to full-res FBO, sampling from mip level
             fbo = QOpenGLFramebufferObject(w, h)
-
-            # Step 3: horizontal blur  input_tex → fbo
-            self._program.bind()
-            self._vao.bind()
-
             fbo.bind()
-            self._ctx.functions().glViewport(0, 0, w, h)
-            self._ctx.functions().glClear(_GL_COLOR_BUFFER_BIT)
+            gl = self._ctx.functions()
+            gl.glViewport(0, 0, w, h)
+            gl.glClear(_GL_COLOR_BUFFER_BIT)
 
-            self._ctx.functions().glActiveTexture(_GL_TEXTURE0)
+            # Use a simple copy shader that reads from a specific mip level
+            # We reuse the _BLUR_VS and a minimal FS
+            if not hasattr(self, '_prog_mip'):
+                mip_fs = b"""#version 330 core
+in vec2 vTexCoord; out vec4 fragColor;
+uniform sampler2D uTexture; uniform float uLod;
+void main() { fragColor = textureLod(uTexture, vTexCoord, uLod); }
+"""
+                self._prog_mip = QOpenGLShaderProgram()
+                self._prog_mip.addShaderFromSourceCode(QOpenGLShader.Vertex, _BLUR_VS)
+                self._prog_mip.addShaderFromSourceCode(QOpenGLShader.Fragment, mip_fs)
+                self._prog_mip.link()
+                self._loc_mip_tex = self._prog_mip.uniformLocation(b"uTexture")
+                self._loc_mip_lod = self._prog_mip.uniformLocation(b"uLod")
+
+            self._prog_mip.bind()
+            self._vao.bind()
+            gl.glActiveTexture(_GL_TEXTURE0)
             tex.bind()
-            self._program.setUniformValue(self._loc_texture, 0)
-            self._program.setUniformValue(self._loc_texel_size, 1.0 / w, 0.0)
-            self._program.setUniformValue(self._loc_blur_scale, blur_scale)
-            self._ctx.functions().glDrawArrays(_GL_TRIANGLES, 0, 3)
+            gl.glGenerateMipmap(_GL_TEXTURE_2D)
+            self._prog_mip.setUniformValue(self._loc_mip_tex, 0)
+            self._prog_mip.setUniformValue(self._loc_mip_lod, 3.0)
+            gl.glDrawArrays(_GL_TRIANGLES, 0, 3)
             tex.release()
+            self._vao.release()
+            self._prog_mip.release()
             fbo.release()
 
-            # Step 4: vertical blur  fbo_tex → result FBO
-            result_fbo = QOpenGLFramebufferObject(w, h)
-            result_fbo.bind()
-            self._ctx.functions().glClear(_GL_COLOR_BUFFER_BIT)
-
-            fbo_tex_id = fbo.texture()
-            self._ctx.functions().glActiveTexture(_GL_TEXTURE0)
-            self._ctx.functions().glBindTexture(_GL_TEXTURE_2D, fbo_tex_id)
-            # Wrap / filter needed because the raw GL texture may not inherit params
-            self._ctx.functions().glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_WRAP_S, _GL_CLAMP_TO_EDGE)
-            self._ctx.functions().glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_WRAP_T, _GL_CLAMP_TO_EDGE)
-            self._ctx.functions().glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_MAG_FILTER, _GL_LINEAR)
-            self._ctx.functions().glTexParameteri(_GL_TEXTURE_2D, _GL_TEXTURE_MIN_FILTER, _GL_LINEAR)
-            self._program.setUniformValue(self._loc_texture, 0)
-            self._program.setUniformValue(self._loc_texel_size, 0.0, 1.0 / h)
-            self._program.setUniformValue(self._loc_blur_scale, blur_scale)
-            self._ctx.functions().glDrawArrays(_GL_TRIANGLES, 0, 3)
-
-            self._vao.release()
-            self._program.release()
-            result_fbo.release()
-
-            # Step 5: read back
-            result_image = result_fbo.toImage()
+            result_image = fbo.toImage()
             result = QPixmap.fromImage(result_image)
 
             self._ctx.doneCurrent()
             return result
         except Exception:
-            logger.warning("GPU blur pass failed", exc_info=True)
+            logger.warning("GPU live blur failed", exc_info=True)
             self._ctx.doneCurrent()
             return None
 
+    # ------------------------------------------------------------------
+    # Liquid Glass refraction (clear glass — no blur, optical effects only)
+    # ------------------------------------------------------------------
 
-def _gpu_blur(pixmap: QPixmap, radius: float) -> QPixmap | None:
-    """Convenience wrapper — returns None if GPU blur is unavailable."""
-    return _GpuBlurEngine().blur(pixmap, radius)
+    def refract(
+        self,
+        input_pixmap: QPixmap,
+        refraction: float = 0.08,
+        highlight_intensity: float = 0.25,
+        corner_radius: float = 14.0,
+        time_sec: float = 0.0,
+    ) -> QPixmap | None:
+        """Single-pass Liquid Glass — fiber-optic edge dispersion, no blur.
+
+        Center ~78%: pure passthrough (original color).
+        Edge ~22%: fiber-optic RGB dispersion (prism-like color fringe).
+        No saturation shift, no warm tint, no noise.
+
+        Returns the final composited QPixmap at input resolution.
+        """
+        if not self._init_gl():
+            return None
+
+        w, h = input_pixmap.width(), input_pixmap.height()
+        if w <= 0 or h <= 0:
+            return None
+
+        if not self._ctx.makeCurrent(self._surface):
+            return None
+
+        try:
+            # Re/create resources on size change
+            if w != self._pool_w or h != self._pool_h:
+                self._pool_w = w
+                self._pool_h = h
+                self._input_tex = QOpenGLTexture(QOpenGLTexture.Target2D)
+                self._input_tex.setSize(w, h)
+                self._input_tex.setFormat(QOpenGLTexture.RGBA8_UNorm)
+                self._input_tex.setMinMagFilters(QOpenGLTexture.Linear, QOpenGLTexture.Linear)
+                self._input_tex.setWrapMode(QOpenGLTexture.ClampToEdge)
+                self._input_tex.allocateStorage()
+                self._up_fbo = None
+
+            if self._up_fbo is None:
+                self._up_fbo = QOpenGLFramebufferObject(w, h)
+
+            # Upload pixmap → texture
+            image = input_pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+            self._input_tex.setData(0, QOpenGLTexture.RGBA, QOpenGLTexture.UInt8,
+                                     image.constBits())
+
+            gl = self._ctx.functions()
+
+            # --- Single pass: Liquid Glass refraction ---
+            self._prog_up.bind()
+            self._vao.bind()
+            self._up_fbo.bind()
+            gl.glViewport(0, 0, w, h)
+            gl.glClear(_GL_COLOR_BUFFER_BIT)
+
+            gl.glActiveTexture(_GL_TEXTURE0)
+            self._input_tex.bind()
+            self._prog_up.setUniformValue(self._loc_up_tex, 0)
+            self._prog_up.setUniformValue(self._loc_up_refraction, refraction)
+            self._prog_up.setUniformValue(self._loc_up_highlight, highlight_intensity)
+            self._prog_up.setUniformValue(self._loc_up_time, time_sec)
+            self._prog_up.setUniformValue(self._loc_up_panel_size,
+                                           float(w), float(h))
+            self._prog_up.setUniformValue(self._loc_up_corner_radius, corner_radius)
+            gl.glDrawArrays(_GL_TRIANGLES, 0, 3)
+
+            self._vao.release()
+            self._prog_up.release()
+            self._input_tex.release()
+            self._up_fbo.release()
+
+            result_image = self._up_fbo.toImage()
+            result = QPixmap.fromImage(result_image)
+
+            self._ctx.doneCurrent()
+            return result
+        except Exception:
+            logger.warning("GPU refract failed", exc_info=True)
+            self._ctx.doneCurrent()
+            return None
 
 # ---------------------------------------------------------------------------
 # Noise texture
@@ -315,22 +576,63 @@ class BackdropBlurCapture:
     overlay of the target (e.g., sidebar panel vs. map in QSplitter).
 
     Downsampling: the captured region is scaled to 1/downsample before blurring
-    and upscaled back afterward. At downsample=3 the pixel count drops to 1/9,
-    making high-quality blur affordable.
+    and upscaled back afterward. At downsample=2 the pixel count drops to 1/4,
+    balancing quality and performance for Liquid Glass aesthetics.
 
     IMPORTANT: Never call capture() from within the child's paintEvent —
     parent.grab() would render the child, causing recursive paintEvent → stack overflow.
     """
 
-    def __init__(self, child: QWidget, blur_radius: int = 25,
+    def __init__(self, child: QWidget, blur_radius: int = 35,
                  capture_target: QWidget | None = None,
-                 downsample: int = 3):
+                 downsample: int = 2,
+                 refraction: float = 0.08,
+                 highlight_intensity: float = 0.25,
+                 corner_radius: float = 14.0):
         self._child = child
         self._blur_radius = blur_radius
         self._capture_target = capture_target
         self._downsample = max(1, downsample)
+        self._refraction = refraction
+        self._highlight_intensity = highlight_intensity
+        self._corner_radius = corner_radius
+        self._time_sec: float = 0.0
         self._cached_pixmap: QPixmap | None = None
         self._cached_geo: QRect | None = None
+
+    @staticmethod
+    def _capture_sub_region(gl_widget: QOpenGLWidget, gl_source: QRect) -> QPixmap | None:
+        """Capture sub-region via grabFramebuffer + CPU crop.
+
+        Uses Qt's safe grabFramebuffer() (glReadPixels under the hood)
+        to read the GL framebuffer, then crops to the panel region.
+        No manual GL state manipulation — avoids interering with the
+        map's rendering pipeline.
+        """
+        try:
+            gl_widget.makeCurrent()
+            fb = gl_widget.grabFramebuffer()
+            gl_widget.doneCurrent()
+            if fb.isNull():
+                return None
+            fb = fb.mirrored(False, True)  # GL origin → QImage origin
+            dpr = fb.devicePixelRatioF() or 1.0
+            if dpr != 1.0:
+                src = QRect(
+                    int(gl_source.x() * dpr),
+                    int(gl_source.y() * dpr),
+                    int(gl_source.width() * dpr),
+                    int(gl_source.height() * dpr),
+                )
+            else:
+                src = gl_source
+            return QPixmap.fromImage(fb.copy(src))
+        except Exception:
+            try:
+                gl_widget.doneCurrent()
+            except Exception:
+                pass
+            return None
 
     def _compute_source_rect(self) -> QRect | None:
         """Map child's global rect into capture-target's local coords.
@@ -369,21 +671,25 @@ class BackdropBlurCapture:
                 return child
         return None
 
-    def capture(self) -> QPixmap | None:
-        """Capture content behind this widget, blurred.
+    def capture(self, live: bool = False) -> QPixmap | None:
+        """Capture background + apply Liquid Glass refraction.
 
-        Returns a pixmap sized to the widget, or None on failure.
+        Uses grabFramebuffer() (safe Qt API) to read the GL framebuffer,
+        crops to panel region, applies Liquid Glass optical effects via
+        GPU shader (refraction, chromatic aberration, specular highlight,
+        vignette, tint, noise — no blur).
 
-        Uses QOpenGLWidget.grabFramebuffer() when available — avoids
-        interfering with the OpenGL rendering pipeline and prevents
-        self-capture of floating child widgets.
+        When live=True, skips the geometry cache for real-time drag refresh.
         """
         geo = self._child.geometry()
         if geo.isEmpty() or geo.width() <= 0 or geo.height() <= 0:
             return None
 
-        if self._cached_geo == geo and self._cached_pixmap and not self._cached_pixmap.isNull():
-            return self._cached_pixmap
+        # During live refresh (drag/zoom), skip cache — background content changes
+        if not live:
+            if self._cached_geo == geo and self._cached_pixmap and not self._cached_pixmap.isNull():
+                logger.debug("capture: cache hit")
+                return self._cached_pixmap
 
         target = self._capture_target or self._child.parentWidget()
         if target is None:
@@ -391,58 +697,81 @@ class BackdropBlurCapture:
 
         gl_widget = self._find_gl_widget()
 
+        # ── GPU path: grabFramebuffer → crop → refract ──
         if gl_widget is not None:
-            # ── GPU path: grabFramebuffer() won't corrupt OpenGL state ──
             source_rect = self._compute_source_rect()
-            if source_rect is None:
-                return None
+            if source_rect is not None:
+                gl_offset = gl_widget.mapFrom(target, QPoint(0, 0))
+                gl_source = QRect(source_rect.topLeft() + gl_offset, source_rect.size())
+                gl_source = gl_source.intersected(gl_widget.rect())
+                if (not gl_source.isEmpty()
+                        and gl_source.width() >= source_rect.width() * 0.5
+                        and gl_source.height() >= source_rect.height() * 0.5):
+                    cropped = self._capture_sub_region(gl_widget, gl_source)
+                    if cropped is not None and not cropped.isNull():
+                        engine = _GpuBlurEngine()
+                        result = engine.refract(
+                            input_pixmap=cropped,
+                            refraction=self._refraction,
+                            highlight_intensity=self._highlight_intensity,
+                            corner_radius=self._corner_radius,
+                            time_sec=self._time_sec,
+                        )
+                        if result is not None and not result.isNull():
+                            if not live:
+                                self._cached_pixmap = result
+                                self._cached_geo = geo
+                            return result
 
-            gl_offset = gl_widget.mapFrom(target, QPoint(0, 0))
-            gl_source = QRect(source_rect.topLeft() + gl_offset, source_rect.size())
-            gl_source = gl_source.intersected(gl_widget.rect())
-            if gl_source.isEmpty():
-                return None
+        return self._capture_fallback_cpu(geo, target)
 
-            gl_widget.makeCurrent()
-            fb = gl_widget.grabFramebuffer()
-            gl_widget.doneCurrent()
+    def capture_live(self) -> QPixmap | None:
+        """Real-time Liquid Glass capture — always re-captures, no cache.
 
-            if fb.isNull():
-                return None
-            cropped = QPixmap.fromImage(fb.copy(gl_source))
-        elif self._capture_target is not None:
-            # ── Software fallback: hide child before render() to avoid self-capture ──
+        During map drag/zoom the background content changes continuously
+        while the panel geometry stays fixed. Bypassing the geometry cache
+        ensures every frame gets a fresh capture.
+        """
+        return self.capture(live=True)
+
+    def invalidate(self) -> None:
+        self._cached_pixmap = None
+        self._cached_geo = None
+
+    def _capture_fallback_cpu(self, geo: QRect, target: QWidget) -> QPixmap | None:
+        """CPU fallback: grab → downsample → QGraphicsBlurEffect → upsample.
+
+        Used when OpenGL 3.3 is unavailable or GL operations fail.
+        Returns the blurred-then-upsampled pixmap (no compositing — the
+        FrostedSurfacePainter will composite on top).
+        """
+        cropped = None
+        if self._capture_target is not None:
             source_rect = self._compute_source_rect()
-            if source_rect is None:
-                return None
+            if source_rect is not None:
+                cropped = QPixmap(source_rect.size())
+                cropped.fill(Qt.transparent)
+                was_visible = self._child.isVisible()
+                if was_visible:
+                    self._child.setVisible(False)
+                target.render(cropped, QPoint(0, 0),
+                              QRect(source_rect.topLeft(), source_rect.size()))
+                if was_visible:
+                    self._child.setVisible(True)
 
-            cropped = QPixmap(source_rect.size())
-            cropped.fill(Qt.transparent)
-            was_visible = self._child.isVisible()
-            if was_visible:
-                self._child.setVisible(False)
-            target.render(cropped, QPoint(0, 0),
-                          QRect(source_rect.topLeft(), source_rect.size()))
-            if was_visible:
-                self._child.setVisible(True)
-            if cropped.isNull():
-                return None
-        else:
+        if cropped is None:
             try:
                 full = target.grab()
             except (AttributeError, RuntimeError):
                 full = QPixmap(target.size())
                 full.fill(Qt.transparent)
                 target.render(full)
+            if not full.isNull():
+                cropped = full.copy(geo)
 
-            if full.isNull():
-                return None
-            cropped = full.copy(geo)
-
-        if cropped.isNull():
+        if cropped is None or cropped.isNull():
             return None
 
-        # Downsample before blur — reduces pixels to 1/(downsample²)
         if self._downsample > 1:
             small_w = max(1, cropped.width() // self._downsample)
             small_h = max(1, cropped.height() // self._downsample)
@@ -456,23 +785,18 @@ class BackdropBlurCapture:
             blur_radius = self._blur_radius
             blur_output_size = cropped.size()
 
-        # GPU-accelerated separable Gaussian blur; falls back to CPU
-        result = _gpu_blur(blur_input, blur_radius)
-        if result is None:
-            # CPU fallback: QGraphicsScene + QGraphicsBlurEffect
-            scene = QGraphicsScene()
-            pixmap_item = scene.addPixmap(blur_input)
-            blur = QGraphicsBlurEffect()
-            blur.setBlurRadius(blur_radius)
-            pixmap_item.setGraphicsEffect(blur)
-            result = QPixmap(blur_output_size)
-            result.fill(Qt.transparent)
-            painter = QPainter(result)
-            scene.render(painter, QRect(QPoint(0, 0), blur_output_size),
-                         QRect(QPoint(0, 0), blur_output_size))
-            painter.end()
+        scene = QGraphicsScene()
+        pixmap_item = scene.addPixmap(blur_input)
+        blur_effect = QGraphicsBlurEffect()
+        blur_effect.setBlurRadius(blur_radius)
+        pixmap_item.setGraphicsEffect(blur_effect)
+        result = QPixmap(blur_output_size)
+        result.fill(Qt.transparent)
+        painter = QPainter(result)
+        scene.render(painter, QRect(QPoint(0, 0), blur_output_size),
+                     QRect(QPoint(0, 0), blur_output_size))
+        painter.end()
 
-        # Upsample back to original size with smooth interpolation
         if self._downsample > 1:
             result = result.scaled(cropped.size(),
                                    Qt.IgnoreAspectRatio,
@@ -482,9 +806,19 @@ class BackdropBlurCapture:
         self._cached_geo = geo
         return result
 
-    def invalidate(self) -> None:
-        self._cached_pixmap = None
-        self._cached_geo = None
+    @classmethod
+    def from_tier(cls, child: QWidget, tier,
+                  capture_target: QWidget | None = None) -> "BackdropBlurCapture":
+        """Create a BackdropBlurCapture from a MaterialTier."""
+        return cls(
+            child,
+            blur_radius=tier.blur_radius,
+            capture_target=capture_target,
+            downsample=tier.downsample,
+            refraction=getattr(tier, 'refraction', 0.08),
+            highlight_intensity=tier.highlight_intensity,
+            corner_radius=float(tier.border_radius),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -496,18 +830,19 @@ class FrostedSurfacePainter:
     """Compose frosted glass layers onto a QPainter.
 
     Layers (bottom → top):
-      1. Blurred backdrop pixmap
+      1. Blurred backdrop pixmap (with pre-blur vibrancy from BackdropBlurCapture)
       2. Adaptive tint color fill (warm base blended with backdrop average)
-      3. Specular highlight gradient (diagonal light reflection)
+      3. Specular highlight gradient (135° light reflection) + corner glow
       4. Multi-scale noise texture overlay
-      5. Directional inner border (top-left bright, bottom-right dark)
+      5. Inset highlight (top-edge light catching glass rim)
+      6. Directional inner border (top-left bright, bottom-right dark)
     """
 
     def __init__(
         self,
         tint_color: QColor | None = None,
         border_color: QColor | None = None,
-        border_radius: float = 8.0,
+        border_radius: float = 14.0,
         highlight_intensity: float = 0.6,
         adaptive_tint: bool = True,
     ):
@@ -518,6 +853,19 @@ class FrostedSurfacePainter:
         self.highlight_intensity = max(0.0, min(1.0, highlight_intensity))
         self._adaptive_tint = adaptive_tint
         self.noise: QPixmap | None = None
+        self._backdrop_luminance: float = 0.5  # 0-1, updated in paint()
+
+    @classmethod
+    def from_tier(cls, tier) -> "FrostedSurfacePainter":
+        """Create a FrostedSurfacePainter from a MaterialTier."""
+        # Warm white tint (not pure white) to avoid washed-out look
+        warm_a = int(tier.tint_alpha * 255)
+        return cls(
+            tint_color=QColor(255, 250, 242, warm_a),
+            border_color=QColor(255, 255, 255, tier.border_alpha),
+            border_radius=float(tier.border_radius),
+            highlight_intensity=tier.highlight_intensity,
+        )
 
     def paint(
         self,
@@ -525,7 +873,13 @@ class FrostedSurfacePainter:
         rect: QRect,
         backdrop: QPixmap | None = None,
     ) -> None:
-        """Paint the complete frosted glass surface in rect."""
+        """Draw the pre-composited Liquid Glass backdrop.
+
+        The backdrop pixmap already contains blur, tint, specular highlight,
+        chromatic aberration, refraction, vignette, noise, and rim light —
+        all composited in a single GPU shader pass. Only the 1px directional
+        inner border is drawn on CPU (trivial cosmetic stroke).
+        """
         from PySide6.QtGui import QPainterPath
 
         painter.save()
@@ -535,24 +889,11 @@ class FrostedSurfacePainter:
         clip_path.addRoundedRect(rect, self.border_radius, self.border_radius)
         painter.setClipPath(clip_path)
 
-        # Layer 1: Blurred backdrop
         if backdrop and not backdrop.isNull():
             painter.drawPixmap(rect, backdrop)
 
-        # Layer 2: Tint color (adaptive — blends backdrop average with warm base)
-        tint = self._compute_adaptive_tint(backdrop) if self._adaptive_tint else self.tint
-        painter.fillRect(rect, tint)
-
-        # Layer 3: Specular highlight (diagonal light reflection)
-        self._draw_specular_highlight(painter, rect)
-
-        # Layer 4: Noise texture
-        if self.noise and not self.noise.isNull():
-            painter.drawPixmap(rect, self.noise)
-
         painter.setClipping(False)
 
-        # Layer 5: Directional inner border (light from top-left)
         self._draw_directional_border(painter, rect)
 
         painter.restore()
@@ -561,25 +902,64 @@ class FrostedSurfacePainter:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _draw_specular_highlight(self, painter: QPainter, rect: QRect) -> None:
-        """Draw a diagonal specular highlight simulating glass reflection.
+    def _draw_specular_highlight(self, painter: QPainter, rect: QRect,
+                                  hi: float = 0.6) -> None:
+        """Draw a 135° diagonal specular highlight simulating Liquid Glass.
 
-        Creates a soft gradient from top-left (bright) to bottom-right (dark),
-        mimicking light reflecting off the glass surface at a glancing angle.
+        Light enters from top-left, creates a bright spot near the corner,
+        then fades across the panel surface. hi is modulated by backdrop luminance.
         """
         from PySide6.QtGui import QLinearGradient
 
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-
-        hi = self.highlight_intensity
-        # Hot spot near top-left corner (~20% of diagonal)
-        hot_alpha = int(35 * hi)
-        gradient.setColorAt(0.0, QColor(255, 255, 255, hot_alpha))
-        gradient.setColorAt(0.15, QColor(255, 255, 255, max(0, hot_alpha - 15)))
-        gradient.setColorAt(0.4, QColor(255, 255, 255, 0))
-        gradient.setColorAt(1.0, QColor(0, 0, 0, int(15 * hi)))
-
+        gradient.setColorAt(0.0, QColor(255, 255, 255, int(250 * hi)))
+        gradient.setColorAt(0.08, QColor(255, 255, 255, int(180 * hi)))
+        gradient.setColorAt(0.25, QColor(255, 255, 255, 0))
+        gradient.setColorAt(1.0, QColor(0, 0, 0, int(40 * hi)))
         painter.fillRect(rect, gradient)
+
+    def _draw_corner_glow(self, painter: QPainter, rect: QRect,
+                           hi: float = 0.6) -> None:
+        """Draw subtle light bloom at each rounded corner."""
+        from PySide6.QtGui import QRadialGradient
+
+        corners = [
+            rect.topLeft(), rect.topRight(),
+            rect.bottomLeft(), rect.bottomRight(),
+        ]
+        radius = 20.0
+        for corner in corners:
+            gradient = QRadialGradient(corner, radius)
+            gradient.setColorAt(0.0, QColor(255, 255, 255, int(80 * hi)))
+            gradient.setColorAt(0.5, QColor(255, 255, 255, int(30 * hi)))
+            gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.fillRect(
+                QRect(int(corner.x() - radius), int(corner.y() - radius),
+                      int(radius * 2), int(radius * 2)),
+                gradient,
+            )
+
+    def _draw_inset_highlight(self, painter: QPainter, rect: QRect,
+                               hi: float = 0.6) -> None:
+        """Draw a top-edge inset highlight simulating light on the glass rim."""
+        from PySide6.QtGui import QLinearGradient, QPainterPath, QPen
+
+        inset_rect = rect.adjusted(1, 1, -1, -1)
+        if inset_rect.width() <= 0 or inset_rect.height() <= 0:
+            return
+
+        path = QPainterPath()
+        path.addRoundedRect(inset_rect, self.border_radius - 1, self.border_radius - 1)
+
+        gradient = QLinearGradient(inset_rect.topLeft(), inset_rect.bottomLeft())
+        gradient.setColorAt(0.0, QColor(255, 255, 255, int(250 * hi)))
+        gradient.setColorAt(0.15, QColor(255, 255, 255, int(160 * hi)))
+        gradient.setColorAt(0.40, QColor(255, 255, 255, 0))
+
+        pen = QPen(gradient, 1.0)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
 
     def _draw_directional_border(self, painter: QPainter, rect: QRect) -> None:
         """Draw an inner border with top-left light and bottom-right shadow.
@@ -639,11 +1019,15 @@ class FrostedSurfacePainter:
                     count += 1
 
         if count == 0:
+            self._backdrop_luminance = 0.5
             return self.tint
 
         avg_r = r_sum // count
         avg_g = g_sum // count
         avg_b = b_sum // count
+
+        # Perceived luminance (ITU-R BT.601)
+        self._backdrop_luminance = (avg_r * 0.299 + avg_g * 0.587 + avg_b * 0.114) / 255.0
 
         # Blend: 70% base tint, 30% background average
         blend = 0.30

@@ -30,7 +30,7 @@ from geotrace.ui.floating_sidebar import FloatingSidebar
 from geotrace.ui.map_widget import MapWidget
 from geotrace.ui.photo_viewer import PhotoViewer
 from geotrace.ui.settings_panel import SettingsPanel
-from geotrace.ui.theme import Colors, Fonts, panel_shadow_effect
+from geotrace.ui.theme import Colors, Fonts, liquid_glass_shadow_effect
 
 logger = logging.getLogger(__name__)
 
@@ -76,18 +76,13 @@ class MainWindow(QMainWindow):
 
         # ── 浮动左侧面板 ──
         self._floating_sidebar = FloatingSidebar(self._db, self._map_view)
-        self._floating_sidebar.set_frosted_alpha(0.63)
+        self._floating_sidebar.set_frosted_alpha(self._floating_sidebar._tier.tint_alpha)
 
         # ── 浮动设置面板 (parent=地图, 叠加在地图右上角) ──
         self._settings_panel = SettingsPanel(self._map_view)
         self._init_settings_panel()
-        self._settings_panel.set_frosted_alpha(0.63)
+        self._settings_panel.set_frosted_alpha(self._settings_panel._tier.tint_alpha)
 
-        # ── 毛玻璃防抖：地图拖拽/缩放停止 100ms 后才刷新 ──
-        self._blur_debounce_timer = QTimer()
-        self._blur_debounce_timer.setSingleShot(True)
-        self._blur_debounce_timer.setInterval(100)
-        self._blur_debounce_timer.timeout.connect(self._do_backdrop_refresh)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -268,7 +263,7 @@ class MainWindow(QMainWindow):
 
     def _show_panel_with_shadow(self, panel: QWidget) -> None:
         if panel.graphicsEffect() is None:
-            panel.setGraphicsEffect(panel_shadow_effect())
+            panel.setGraphicsEffect(liquid_glass_shadow_effect())
 
     def _animate_slide_in(self, panel: QWidget, from_left: bool = True) -> None:
         target_geo = panel.geometry()
@@ -281,10 +276,13 @@ class MainWindow(QMainWindow):
         panel.raise_()
 
         anim = QPropertyAnimation(panel, b"geometry")
-        anim.setDuration(200)
+        anim.setDuration(350)
         anim.setStartValue(start_geo)
         anim.setEndValue(target_geo)
-        anim.setEasingCurve(QEasingCurve.OutBack)
+        # OutBack = spring-like overshoot (Apple HIG: ~0.825 damping)
+        curve = QEasingCurve(QEasingCurve.OutBack)
+        anim.setEasingCurve(curve)
+        anim.finished.connect(lambda: panel.capture_backdrop_now())
         anim.start()
         panel._slide_anim = anim  # type: ignore[attr-defined]
 
@@ -296,9 +294,10 @@ class MainWindow(QMainWindow):
             end_geo = current_geo.translated(current_geo.width(), 0)
 
         anim = QPropertyAnimation(panel, b"geometry")
-        anim.setDuration(150)
+        anim.setDuration(250)
         anim.setStartValue(current_geo)
         anim.setEndValue(end_geo)
+        # InCubic = smooth exit, no bounce (Apple HIG: exit faster than enter)
         anim.setEasingCurve(QEasingCurve.InCubic)
         anim.finished.connect(panel.hide)
         anim.start()
@@ -360,28 +359,25 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_view_changed(self) -> None:
-        """地图拖拽/缩放时防抖刷新毛玻璃背景.
+        """Map drag/zoom — real-time Liquid Glass refresh every frame.
 
-        每次拖拽/缩放事件都重启定时器，仅在停止 100ms 后执行一次刷新，
-        与 macOS / Windows Acrylic 行为一致。
+        The GPU composite pipeline runs in ~1ms at panel resolution,
+        so a single path serves both real-time and final quality.
         """
-        if self._settings_panel.isVisible() or self._floating_sidebar.isVisible():
-            self._blur_debounce_timer.start()
-
-    def _do_backdrop_refresh(self) -> None:
-        """防抖定时器到期后执行真正的毛玻璃背景刷新."""
         if self._settings_panel.isVisible():
-            self._settings_panel.request_backdrop_refresh()
+            self._settings_panel.request_backdrop_live()
         if self._floating_sidebar.isVisible():
-            self._floating_sidebar.request_backdrop_refresh()
+            self._floating_sidebar.request_backdrop_live()
 
     @Slot(int)
     def _on_frosted_alpha_changed(self, value: int) -> None:
-        """毛玻璃透明度滑块调节."""
-        alpha = value / 100.0
-        self._map_view.set_frosted_alpha(alpha)
-        self._settings_panel.set_frosted_alpha(alpha)
-        self._floating_sidebar.set_frosted_alpha(alpha)
+        """毛玻璃透明度滑块调节 — 作为各 tier 基础 alpha 的乘数."""
+        multiplier = value / 100.0
+        sidebar_alpha = self._floating_sidebar._tier.tint_alpha * multiplier
+        settings_alpha = self._settings_panel._tier.tint_alpha * multiplier
+        self._map_view.set_frosted_alpha(sidebar_alpha)
+        self._settings_panel.set_frosted_alpha(settings_alpha)
+        self._floating_sidebar.set_frosted_alpha(sidebar_alpha)
 
     @Slot(list)
     def _on_cluster_clicked(self, ids: list[int]) -> None:
