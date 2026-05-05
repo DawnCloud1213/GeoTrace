@@ -6,7 +6,44 @@
   - 按钮色与地图热力色阶协调 (避免 Material Design 绿/红)
 """
 
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtWidgets import QPushButton
+
+
+# ==========================================================================
+# Close button (hand-drawn X, no font dependency)
+# ==========================================================================
+
+class CloseButton(QPushButton):
+    """手绘 X 关闭按钮 — 不依赖字体."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet("background: transparent; border: none;")
+        self._hovered = False
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QColor("#E67E22") if self._hovered else QColor("#3A1E08")
+        pen = QPen(c, 2.0)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        m = 6
+        p.drawLine(m, m, self.width() - m, self.height() - m)
+        p.drawLine(self.width() - m, m, m, self.height() - m)
+        p.end()
 
 
 # ==========================================================================
@@ -24,8 +61,8 @@ class Colors:
     INPUT_BG = "#FAFAF5"
 
     # Text
-    TEXT_PRIMARY = "#503214"
-    TEXT_SECONDARY = "#8B7355"
+    TEXT_PRIMARY = "#3A1E08"
+    TEXT_SECONDARY = "#6B5540"
     TEXT_DISABLED = "#B8A88E"
     TEXT_ON_ACCENT = "#FFFFFF"
 
@@ -107,9 +144,9 @@ class Fonts:
 class Metrics:
     """统一尺寸."""
 
-    BORDER_RADIUS_SM = 4
-    BORDER_RADIUS_MD = 8
-    BORDER_RADIUS_LG = 12
+    BORDER_RADIUS_SM = 6
+    BORDER_RADIUS_MD = 12
+    BORDER_RADIUS_LG = 20
     PADDING_XS = 4
     PADDING_SM = 8
     PADDING_MD = 12
@@ -210,8 +247,9 @@ QPushButton:disabled {{
 /* QPushButton 语义变体 (通过 cssClass 属性选择) */
 QPushButton[cssClass="primary"] {{
     background-color: {Colors.ACCENT_PRIMARY};
-    color: {Colors.TEXT_ON_ACCENT};
+    color: {Colors.TEXT_PRIMARY};
     border: none;
+    border-radius: {Metrics.BORDER_RADIUS_MD}px;
     font-weight: bold;
 }}
 QPushButton[cssClass="primary"]:hover {{
@@ -219,16 +257,20 @@ QPushButton[cssClass="primary"]:hover {{
 }}
 QPushButton[cssClass="danger"] {{
     background-color: {Colors.DANGER};
-    color: {Colors.TEXT_ON_ACCENT};
+    color: {Colors.TEXT_PRIMARY};
     border: none;
+    border-radius: {Metrics.BORDER_RADIUS_MD}px;
+    font-weight: bold;
 }}
 QPushButton[cssClass="danger"]:hover {{
     background-color: {Colors.DANGER_HOVER};
 }}
 QPushButton[cssClass="success"] {{
     background-color: {Colors.SUCCESS};
-    color: {Colors.TEXT_ON_ACCENT};
+    color: {Colors.TEXT_PRIMARY};
     border: none;
+    border-radius: {Metrics.BORDER_RADIUS_MD}px;
+    font-weight: bold;
 }}
 QPushButton[cssClass="success"]:hover {{
     background-color: {Colors.SUCCESS_HOVER};
@@ -238,11 +280,11 @@ QPushButton[cssClass="success"]:hover {{
 QPushButton[cssClass="ghost"] {{
     background: transparent;
     border: none;
-    color: {Colors.TEXT_SECONDARY};
+    color: {Colors.TEXT_PRIMARY};
     font-size: 14px;
 }}
 QPushButton[cssClass="ghost"]:hover {{
-    color: {Colors.TEXT_PRIMARY};
+    color: {Colors.ACCENT_PRIMARY};
 }}
 
 /* QPushButton 地图叠加按钮 */
@@ -258,6 +300,15 @@ QPushButton[cssClass="mapOverlay"]:hover {{
     background: rgba(255,255,255,0.95);
     border-color: {Colors.ACCENT_PRIMARY};
     color: {Colors.ACCENT_PRIMARY};
+}}
+
+/* ── QLabel section header ─────────────────────────────────────── */
+QLabel[cssClass="sectionLabel"] {{
+    background: rgba(255,253,250,0.95);
+    border-radius: 8px;
+    padding: 3px 10px;
+    color: {Colors.TEXT_PRIMARY};
+    font-weight: bold;
 }}
 
 /* ── QListView / QListWidget ────────────────────────────────────── */
@@ -326,7 +377,7 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
 /* ── QProgressBar ────────────────────────────────────────────────── */
 QProgressBar {{
     border: 1px solid {Colors.BORDER_LIGHT};
-    border-radius: 3px;
+    border-radius: {Metrics.BORDER_RADIUS_SM}px;
     background-color: {Colors.PROGRESS_TRACK};
     height: 14px;
     text-align: center;
@@ -334,7 +385,7 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{
     background-color: {Colors.PROGRESS_CHUNK};
-    border-radius: 2px;
+    border-radius: {Metrics.BORDER_RADIUS_SM}px;
 }}
 
 /* ── QToolTip ────────────────────────────────────────────────────── */

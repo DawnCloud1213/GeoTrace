@@ -136,3 +136,39 @@ def compute_fit_zoom_and_center(
     p1x, p1y = MercatorProjection.lnglat_to_pixel(min_lng, min_lat, zf)
     p2x, p2y = MercatorProjection.lnglat_to_pixel(max_lng, max_lat, zf)
     return (p1x + p2x) / 2.0, (p1y + p2y) / 2.0, zf
+
+
+def compute_fit_zoom_by_height(
+    min_lat: float,
+    max_lat: float,
+    mid_lng: float,
+    viewport_height: int,
+) -> tuple[float, float, float]:
+    """按高度精确适配 zoom — 北端贴窗口上边, 南端贴下边.
+
+    返回分数级 zoom, 瓦片在整数级渲染并随 zoom_scale 缩放;
+    新瓦片异步加载完成后无缝呈现.
+    """
+    import math
+    # Find the base integer zoom where height fits
+    for z in range(MAX_ZOOM, MIN_ZOOM - 1, -1):
+        zf = float(z)
+        _, p1y = MercatorProjection.lnglat_to_pixel(mid_lng, min_lat, zf)
+        _, p2y = MercatorProjection.lnglat_to_pixel(mid_lng, max_lat, zf)
+        ph = abs(p2y - p1y)
+        if ph <= viewport_height:
+            # Compute the exact fractional zoom to fill the viewport height
+            exact_zoom = zf + math.log2(viewport_height / ph)
+            exact_zoom = max(float(MIN_ZOOM), min(float(MAX_ZOOM), exact_zoom))
+            cx, _ = MercatorProjection.lnglat_to_pixel(
+                mid_lng, (min_lat + max_lat) / 2.0, exact_zoom)
+            # Recompute cy at the exact fractional zoom for accurate centering
+            _, cy_n = MercatorProjection.lnglat_to_pixel(mid_lng, max_lat, exact_zoom)
+            _, cy_s = MercatorProjection.lnglat_to_pixel(mid_lng, min_lat, exact_zoom)
+            cy = (cy_n + cy_s) / 2.0
+            return cx, cy, exact_zoom
+
+    zf = float(MIN_ZOOM)
+    cx, cy1 = MercatorProjection.lnglat_to_pixel(mid_lng, min_lat, zf)
+    _, cy2 = MercatorProjection.lnglat_to_pixel(mid_lng, max_lat, zf)
+    return cx, (cy1 + cy2) / 2.0, zf

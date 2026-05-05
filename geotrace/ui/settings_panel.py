@@ -22,7 +22,8 @@ from geotrace.ui.blur_engine import (
     FrostedSurfacePainter,
 )
 from geotrace.ui.material import THIN
-from geotrace.ui.theme import Colors, Fonts, Metrics
+from geotrace.ui.province_list import _RoundedItemDelegate
+from geotrace.ui.theme import CloseButton, Colors, Fonts, Metrics
 
 
 class SettingsPanel(QFrame):
@@ -62,13 +63,10 @@ class SettingsPanel(QFrame):
         header = QHBoxLayout()
         title = QLabel("设置")
         title.setFont(Fonts.title(11))
-        title.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        title.setProperty("cssClass", "sectionLabel")
         header.addWidget(title)
         header.addStretch()
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(24, 24)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setProperty("cssClass", "ghost")
+        close_btn = CloseButton()
         close_btn.clicked.connect(self.closeRequested.emit)
         header.addWidget(close_btn)
         layout.addLayout(header)
@@ -76,42 +74,47 @@ class SettingsPanel(QFrame):
         # ── 照片目录 ──
         dir_label = QLabel("照片目录")
         dir_label.setFont(Fonts.title(10))
-        dir_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        dir_label.setProperty("cssClass", "sectionLabel")
         layout.addWidget(dir_label)
 
         self._dir_list = QListWidget()
+        self._dir_list.setItemDelegate(_RoundedItemDelegate(self._dir_list))
         self._dir_list.setStyleSheet(f"""
             QListWidget {{
-                border: 1px solid rgba(232,224,208,0.40);
-                border-radius: 4px;
-                background: rgba(250,250,245,0.50);
+                border: 1px solid rgba(232,224,208,0.50);
+                border-radius: 12px;
+                background: rgba(255,253,250,0.20);
                 font-size: 12px;
                 color: {Colors.TEXT_PRIMARY};
+                padding: 4px;
             }}
             QListWidget::item {{
-                padding: 4px 8px;
-                border-bottom: 1px solid rgba(232,224,208,0.30);
+                padding: 5px 10px;
+                border: none;
                 color: {Colors.TEXT_PRIMARY};
-            }}
-            QListWidget::item:hover {{
-                background: rgba(255,243,224,0.60);
             }}
         """)
         layout.addWidget(self._dir_list)
 
         add_btn = QPushButton("+ 添加目录")
         add_btn.setProperty("cssClass", "success")
-        add_btn.style().unpolish(add_btn)
-        add_btn.style().polish(add_btn)
-        add_btn.setStyleSheet("color: #503214; font-weight: bold;")
+        add_btn.setStyleSheet("""
+            QPushButton[cssClass="success"] {
+                color: #3A1E08; font-weight: bold;
+                border-radius: 12px; padding: 6px 12px;
+            }
+        """)
         add_btn.clicked.connect(self._on_add_directory)
         layout.addWidget(add_btn)
 
         remove_btn = QPushButton("- 移除选中")
         remove_btn.setProperty("cssClass", "danger")
-        remove_btn.style().unpolish(remove_btn)
-        remove_btn.style().polish(remove_btn)
-        remove_btn.setStyleSheet("color: #FFFFFF; font-weight: bold; background-color: #B5432E; border: none;")
+        remove_btn.setStyleSheet("""
+            QPushButton[cssClass="danger"] {
+                color: #3A1E08; font-weight: bold;
+                border-radius: 12px; padding: 6px 12px;
+            }
+        """)
         remove_btn.clicked.connect(self._on_remove_directory)
         layout.addWidget(remove_btn)
 
@@ -124,20 +127,23 @@ class SettingsPanel(QFrame):
         # ── 扫描 ──
         scan_label = QLabel("扫描")
         scan_label.setFont(Fonts.title(10))
-        scan_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        scan_label.setProperty("cssClass", "sectionLabel")
         layout.addWidget(scan_label)
 
         rescan_btn = QPushButton("重新扫描所有目录")
         rescan_btn.setProperty("cssClass", "primary")
-        rescan_btn.style().unpolish(rescan_btn)
-        rescan_btn.style().polish(rescan_btn)
-        rescan_btn.setStyleSheet(f"font-size: 13px; padding: 7px 12px; color: #FFFFFF; background-color: {Colors.ACCENT_PRIMARY}; border: none;")
+        rescan_btn.setStyleSheet(f"""
+            QPushButton[cssClass="primary"] {{
+                font-size: 13px; padding: 8px 16px;
+                border-radius: 12px;
+                background-color: {Colors.ACCENT_PRIMARY};
+                color: #3A1E08;
+                font-weight: bold;
+                border: none;
+            }}
+        """)
         rescan_btn.clicked.connect(self._on_rescan)
         layout.addWidget(rescan_btn)
-
-        self._progress = QProgressBar()
-        self._progress.setVisible(False)
-        layout.addWidget(self._progress)
 
         # ── 分隔 ──
         sep2 = QLabel()
@@ -148,37 +154,21 @@ class SettingsPanel(QFrame):
         # ── 显示效果 ──
         fx_label = QLabel("显示效果")
         fx_label.setFont(Fonts.title(10))
-        fx_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        fx_label.setProperty("cssClass", "sectionLabel")
         layout.addWidget(fx_label)
 
         self._thumb_check = QCheckBox("全国视图显示缩略图")
-        self._thumb_check.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        self._thumb_check.setStyleSheet(f"""
+            QCheckBox {{
+                color: {Colors.TEXT_PRIMARY};
+                font-size: 12px;
+                background: rgba(255,253,250,0.20);
+                border-radius: 6px;
+                padding: 4px 8px;
+            }}
+        """)
         self._thumb_check.toggled.connect(self.thumbnailToggleChanged.emit)
         layout.addWidget(self._thumb_check)
-
-        # 透明度滑块
-        slider_row = QHBoxLayout()
-        slider_label = QLabel("面板透明度")
-        slider_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
-        slider_row.addWidget(slider_label)
-
-        self._alpha_slider = QSlider(Qt.Horizontal)
-        self._alpha_slider.setRange(30, 100)
-        self._alpha_slider.setValue(100)
-        self._alpha_slider.setTickPosition(QSlider.TicksBelow)
-        self._alpha_slider.setTickInterval(10)
-        self._alpha_slider.valueChanged.connect(self.frostedAlphaChanged.emit)
-        slider_row.addWidget(self._alpha_slider)
-
-        self._alpha_value_label = QLabel("100%")
-        self._alpha_value_label.setFixedWidth(36)
-        self._alpha_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self._alpha_value_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
-        self._alpha_slider.valueChanged.connect(
-            lambda v: self._alpha_value_label.setText(f"{v}%")
-        )
-        slider_row.addWidget(self._alpha_value_label)
-        layout.addLayout(slider_row)
 
         layout.addStretch()
         self.hide()

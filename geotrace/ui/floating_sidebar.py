@@ -1,7 +1,7 @@
 """左侧浮动侧边栏 — 毛玻璃 + 分段控件(省份/照片切换)."""
 
 from PySide6.QtCore import QSize, Qt, QTimer, QRect, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -21,7 +21,7 @@ from geotrace.ui.blur_engine import (
 from geotrace.ui.material import REGULAR
 from geotrace.ui.photo_grid import PhotoGrid
 from geotrace.ui.province_list import ProvinceListPanel
-from geotrace.ui.theme import Colors, Fonts, Metrics
+from geotrace.ui.theme import CloseButton, Colors, Fonts, Metrics
 
 
 class FloatingSidebar(QFrame):
@@ -65,14 +65,12 @@ class FloatingSidebar(QFrame):
         # ── 顶部栏（仅关闭按钮） ──
         top_bar = QFrame()
         top_bar.setFixedHeight(36)
+        top_bar.setStyleSheet("background: transparent; border: none;")
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(8, 0, 4, 0)
         top_layout.setSpacing(0)
 
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(24, 24)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setProperty("cssClass", "ghost")
+        close_btn = CloseButton()
         close_btn.clicked.connect(self.closeRequested.emit)
         top_layout.addWidget(close_btn)
         top_layout.addStretch()
@@ -110,7 +108,7 @@ class FloatingSidebar(QFrame):
                     color: %s;
                     padding: 0;
                 }
-            """ % Colors.TEXT_SECONDARY)
+            """ % Colors.TEXT_PRIMARY)
 
         self._btn_group = QButtonGroup(self)
         self._btn_group.addButton(self._btn_provinces, 0)
@@ -165,9 +163,8 @@ class FloatingSidebar(QFrame):
 
         self._province_list = ProvinceListPanel(frosted=False)
         self._province_list.provinceClicked.connect(self.provinceClicked.emit)
-        for child in self._province_list.findChildren(QPushButton):
-            if child.text() == "✕":
-                child.setVisible(False)
+        for child in self._province_list.findChildren(CloseButton):
+            child.setVisible(False)
         self._content_stack.addWidget(self._province_list)
 
         self._photo_grid = PhotoGrid(db)
@@ -240,24 +237,26 @@ class FloatingSidebar(QFrame):
     # ------------------------------------------------------------------
 
     def _draw_slider_indicator(self, painter: QPainter) -> None:
-        """在分段按钮下方绘制毛玻璃滑块指示器."""
+        """绘制药丸形滑块指示器 — iOS 风格胶囊选中背景."""
         container = self._seg_container
         w = container.width()
         h = container.height()
 
         seg_count = 2
-        seg_width = (w - 4) // seg_count
-        slider_w = seg_width - 4
-        slider_h = 4
-        slider_y = h - slider_h - 2
-        slider_x = 2 + int(self._slider_pos * seg_width)
+        seg_width = (w - 8) // seg_count
+        # Pill shape: slight inset, nearly full height
+        pill_x = 4 + int(self._slider_pos * seg_width)
+        pill_y = 3
+        pill_w = seg_width
+        pill_h = h - 6
+        pill_r = pill_h / 2.0  # half-height = pill shape
 
         path = QPainterPath()
-        r = Metrics.BORDER_RADIUS_SM
-        path.addRoundedRect(QRect(slider_x, slider_y, slider_w, slider_h), r, r)
+        path.addRoundedRect(QRect(pill_x, pill_y, pill_w, pill_h),
+                           pill_r, pill_r)
 
-        tint = QColor(Colors.FROSTED_TINT_R, Colors.FROSTED_TINT_G,
-                      Colors.FROSTED_TINT_B, 160)
+        # 药丸填充 — 足够不透明以衬托深色文字
+        tint = QColor(255, 255, 255, 160)
         painter.fillPath(path, tint)
 
         # 动态更新按钮选中颜色
@@ -281,7 +280,7 @@ class FloatingSidebar(QFrame):
                         font-weight: normal;
                         padding: 0;
                     }
-                """ % Colors.TEXT_SECONDARY)
+                """ % Colors.TEXT_PRIMARY)
 
     # ------------------------------------------------------------------
     # 毛玻璃渲染

@@ -198,7 +198,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
         shadow_rect = card_rect.translated(0, 2)
         painter.setPen(Qt.NoPen)
         painter.setBrush(shadow_color)
-        painter.drawRoundedRect(shadow_rect, 8, 8)
+        painter.drawRoundedRect(shadow_rect, 12, 12)
 
         # 卡片主体背景
         if option.state & QStyle.State_Selected:
@@ -210,7 +210,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
         painter.setBrush(card_bg)
         painter.setPen(QPen(QColor(Colors.BORDER_LIGHT), 1))
-        painter.drawRoundedRect(card_rect, 8, 8)
+        painter.drawRoundedRect(card_rect, 12, 12)
 
         # 图片区域(顶部圆角裁剪)
         img_margin = 8

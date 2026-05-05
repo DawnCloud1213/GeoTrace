@@ -313,7 +313,6 @@ class MainWindow(QMainWindow):
         if not province_name:
             return
         logger.info("进入省份视图: %s", province_name)
-        self._settings_panel.hide()
         photos = self._db.get_photo_coords(province_name)
         self._map_view.enter_province_view(province_name, photos)
         self._floating_sidebar._photo_grid.load_province(province_name)
@@ -323,9 +322,8 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _exit_province_view(self) -> None:
-        """返回全国地图视图: 隐藏设置面板，清空照片聚类."""
+        """返回全国地图视图: 清空照片聚类."""
         logger.info("返回全国视图")
-        self._settings_panel.hide()
         self._map_view.exit_province_view()
         self._floating_sidebar.switch_to_provinces_tab()
         if self._map_view._canvas._force_thumbnail_mode:

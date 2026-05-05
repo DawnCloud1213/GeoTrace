@@ -1,4 +1,4 @@
-"""Frosted glass rendering engine — backdrop blur + noise texture.
+"""Frosted glass rendering engine -- backdrop blur + noise texture.
 
 Strategy A: Backdrop capture + GPU-accelerated separable Gaussian blur (FBO + GLSL)
 Strategy B: Multi-scale procedural noise texture overlay (grain on all frosted surfaces)
@@ -73,7 +73,7 @@ void main() {
 
 # Fragment shader: Liquid Glass -- full-color fiber-optic edge dispersion.
 #
-# Center ~78% area: pure passthrough — no distortion, no color shift,
+# Center ~78% area: pure passthrough -- no distortion, no color shift,
 # no tint, no noise. The background shows through exactly as-is.
 #
 # Outer edge ring (~22%): fiber-optic chromatic dispersion simulating
@@ -81,7 +81,7 @@ void main() {
 # at slightly different radial offsets, producing a prism-like color
 # fringe that intensifies toward the very edge.
 #
-# No blur kernel — Apple Liquid Glass is transparent glass, not frosted.
+# No blur kernel -- Apple Liquid Glass is transparent glass, not frosted.
 _LIQUID_GLASS_FS = b"""#version 330 core
 in vec2 vTexCoord;
 out vec4 fragColor;
@@ -93,48 +93,47 @@ uniform float uCornerRadius;
 void main() {
     vec2 uv = vTexCoord;
 
-    // -- Rectangular edge zone: center 55% = clear, outer 45% = glass --
+    // -- Arc zone: ~18% of half-width from each edge --
     float mx = abs(uv.x - 0.5) * 2.0;
     float my = abs(uv.y - 0.5) * 2.0;
     float margin = max(mx, my);
-    float edgeZone = smoothstep(0.55, 1.0, margin);
+    float edginess = smoothstep(0.82, 1.0, margin);
 
-    // -- Dispersion direction: outward from nearest edge --
-    vec2 edgeDir;
+    // -- Arc normal: points FROM edge TOWARD panel centre --
+    vec2 arcNormal;
     if (mx > my) {
-        edgeDir = vec2(sign(uv.x - 0.5), 0.0);
+        arcNormal = vec2(sign(0.5 - uv.x), 0.0);
     } else {
-        edgeDir = vec2(0.0, sign(uv.y - 0.5));
+        arcNormal = vec2(0.0, sign(0.5 - uv.y));
     }
 
-    // -- 1. Spatial refractive warping --
-    // 0.30 UV at full edge zone: visible distortion without being extreme.
-    float warp = 0.30 * edgeZone * margin * margin;
-    warp += sin(uv.y * 35.0 + uTime * 0.3) * 0.012 * edgeZone;
-    vec2 warpedUV = uv + edgeDir * warp;
+    // -- 1. Arc magnification (quartic: steep arc shoulder) --
+    // margin^4 creates a sharper arc profile: dramatic near the edge
+    // with rapid drop-off, like a cylindrical glass lens surface.
+    float mag = 0.12 * edginess * margin * margin * margin * margin;
+    vec2 warpedUV = uv + arcNormal * mag;
 
-    // -- 2. Sample at warped position (geometric distortion) --
+    // -- 2. Sample at refracted position --
     vec4 col = texture(uTexture, warpedUV);
 
-    // -- 3. Chromatic aberration on warped base --
-    float chroma = edgeZone * 0.20;
-    float r = texture(uTexture, warpedUV + edgeDir * chroma).r;
-    float b = texture(uTexture, warpedUV - edgeDir * chroma * 1.4).b;
-    col.r = mix(col.r, r, edgeZone * 0.7);
-    col.b = mix(col.b, b, edgeZone * 0.7);
+    // -- 2. Fresnel rim highlight (arc peak) --
+    float fresnel = 0.22 * pow(1.0 - margin, 5.0) * edginess;
+    col.rgb += vec3(1.0, 1.0, 1.0) * fresnel;
 
-    // -- 4. Edge glass-thickness shadow --
-    float thickness = smoothstep(0.75, 1.0, margin) * edgeZone * 0.10;
-    col.rgb *= 1.0 - thickness;
+    // -- 3. Subtle chromatic dispersion --
+    float chroma = 0.012 * edginess;
+    float r = texture(uTexture, warpedUV - arcNormal * chroma).r;
+    float b = texture(uTexture, warpedUV + arcNormal * chroma).b;
+    col.r = mix(col.r, r, edginess * 0.30);
+    col.b = mix(col.b, b, edginess * 0.30);
 
-    // -- 5. Cool rim glow --
-    float rimGlow = smoothstep(0.85, 1.0, margin) * 0.03;
-    col.rgb += vec3(0.85, 0.92, 1.0) * rimGlow;
+    // -- 4. Directional specular highlight --
+    float spec = exp(-margin * margin * 10.0) * edginess * 0.035;
+    float light = 0.5 + 0.5 * dot(normalize(uv - 0.5 + 0.001), normalize(vec2(-0.7, -0.7)));
+    col.rgb += vec3(1.0, 0.97, 0.92) * spec * light;
 
-    // -- 6. Warm specular highlight --
-    float spec = smoothstep(0.78, 0.94, margin) * 0.015;
-    float dir = 0.5 + 0.5 * dot(normalize(uv - 0.5 + 0.001), normalize(vec2(-0.7, -0.7)));
-    col.rgb += vec3(1.0, 0.97, 0.92) * (spec * dir);
+    // -- 5. Edge thickness shadow --
+    col.rgb *= 1.0 - smoothstep(0.85, 1.0, margin) * edginess * 0.06;
 
     fragColor = col;
 }
@@ -145,12 +144,12 @@ void main() {
 class _GpuBlurEngine:
     """Singleton: standalone GL context + Liquid Glass refraction program.
 
-    Creates an independent OpenGL 3.3 context (no sharing needed — all
+    Creates an independent OpenGL 3.3 context (no sharing needed -- all
     rendering goes to our own FBO). If globalShareContext is available
     it will be used for sharing, but lack of it is not a blocker.
 
     refract(): Single-pass GPU shader applying fiber-optic edge dispersion
-    — no blur, no tint, full-color passthrough at center.
+    -- no blur, no tint, full-color passthrough at center.
     """
 
     _instance = None
@@ -167,11 +166,11 @@ class _GpuBlurEngine:
         try:
             fmt = QSurfaceFormat.defaultFormat()
 
-            # Create a standalone OpenGL context — no sharing needed since
+            # Create a standalone OpenGL context -- no sharing needed since
             # we render to our own FBO and don't share textures.
             self._ctx = QOpenGLContext()
             # Try sharing with global context if available (Qt < 6), but
-            # don't bail if unavailable — standalone works fine for FBO ops.
+            # don't bail if unavailable -- standalone works fine for FBO ops.
             share_ctx = QOpenGLContext.globalShareContext()
             if share_ctx is not None:
                 self._ctx.setShareContext(share_ctx)
@@ -212,13 +211,13 @@ class _GpuBlurEngine:
                 if not prog.isLinked():
                     logger.warning("Shader %s link failed: %s", name, prog.log())
 
-            # VAO (required by core profile, empty — we use gl_VertexID)
+            # VAO (required by core profile, empty -- we use gl_VertexID)
             self._vao = QOpenGLVertexArrayObject()
             if not self._vao.isCreated():
                 if not self._vao.create():
                     raise RuntimeError("VAO creation failed")
 
-            # Pooled resources — recreated on size change
+            # Pooled resources -- recreated on size change
             self._pool_w = 0
             self._pool_h = 0
             self._input_tex: QOpenGLTexture | None = None
@@ -339,7 +338,7 @@ class _GpuBlurEngine:
     def blur_live(self, input_pixmap: QPixmap) -> QPixmap | None:
         """Ultra-fast mipmap blur: glGenerateMipmap + textureLod sampling.
 
-        No custom shader — just GPU-hardware mipmap generation and
+        No custom shader -- just GPU-hardware mipmap generation and
         linear-mipmap-linear sampling. ~1ms total.
         """
         if not self._init_gl():
@@ -410,7 +409,7 @@ void main() { fragColor = textureLod(uTexture, vTexCoord, uLod); }
             return None
 
     # ------------------------------------------------------------------
-    # Liquid Glass refraction (clear glass — no blur, optical effects only)
+    # Liquid Glass refraction (clear glass -- no blur, optical effects only)
     # ------------------------------------------------------------------
 
     def refract(
@@ -421,7 +420,7 @@ void main() { fragColor = textureLod(uTexture, vTexCoord, uLod); }
         corner_radius: float = 14.0,
         time_sec: float = 0.0,
     ) -> QPixmap | None:
-        """Single-pass Liquid Glass — fiber-optic edge dispersion, no blur.
+        """Single-pass Liquid Glass -- fiber-optic edge dispersion, no blur.
 
         Center ~78%: pure passthrough (original color).
         Edge ~22%: fiber-optic RGB dispersion (prism-like color fringe).
@@ -578,14 +577,14 @@ class BackdropBlurCapture:
     applies Gaussian blur, and caches the result.
 
     If capture_target is provided, the backdrop is captured from that widget
-    instead of the child's parent — useful when the child is not a direct
+    instead of the child's parent -- useful when the child is not a direct
     overlay of the target (e.g., sidebar panel vs. map in QSplitter).
 
     Downsampling: the captured region is scaled to 1/downsample before blurring
     and upscaled back afterward. At downsample=2 the pixel count drops to 1/4,
     balancing quality and performance for Liquid Glass aesthetics.
 
-    IMPORTANT: Never call capture() from within the child's paintEvent —
+    IMPORTANT: Never call capture() from within the child's paintEvent --
     parent.grab() would render the child, causing recursive paintEvent → stack overflow.
     """
 
@@ -612,7 +611,7 @@ class BackdropBlurCapture:
 
         Uses Qt's safe grabFramebuffer() (glReadPixels under the hood)
         to read the GL framebuffer, then crops to the panel region.
-        No manual GL state manipulation — avoids interering with the
+        No manual GL state manipulation -- avoids interering with the
         map's rendering pipeline.
         """
         try:
@@ -683,7 +682,7 @@ class BackdropBlurCapture:
         Uses grabFramebuffer() (safe Qt API) to read the GL framebuffer,
         crops to panel region, applies Liquid Glass optical effects via
         GPU shader (refraction, chromatic aberration, specular highlight,
-        vignette, tint, noise — no blur).
+        vignette, tint, noise -- no blur).
 
         When live=True, skips the geometry cache for real-time drag refresh.
         """
@@ -691,7 +690,7 @@ class BackdropBlurCapture:
         if geo.isEmpty() or geo.width() <= 0 or geo.height() <= 0:
             return None
 
-        # During live refresh (drag/zoom), skip cache — background content changes
+        # During live refresh (drag/zoom), skip cache -- background content changes
         if not live:
             if self._cached_geo == geo and self._cached_pixmap and not self._cached_pixmap.isNull():
                 logger.debug("capture: cache hit")
@@ -754,7 +753,7 @@ class BackdropBlurCapture:
         return self._capture_fallback_cpu(geo, target)
 
     def capture_live(self) -> QPixmap | None:
-        """Real-time Liquid Glass capture — always re-captures, no cache.
+        """Real-time Liquid Glass capture -- always re-captures, no cache.
 
         During map drag/zoom the background content changes continuously
         while the panel geometry stays fixed. Bypassing the geometry cache
@@ -804,7 +803,7 @@ class BackdropBlurCapture:
         """CPU fallback: grab → downsample → QGraphicsBlurEffect → upsample.
 
         Used when OpenGL 3.3 is unavailable or GL operations fail.
-        Returns the blurred-then-upsampled pixmap (no compositing — the
+        Returns the blurred-then-upsampled pixmap (no compositing -- the
         FrostedSurfacePainter will composite on top).
         """
         cropped = None
@@ -938,7 +937,7 @@ class FrostedSurfacePainter:
         """Draw the pre-composited Liquid Glass backdrop.
 
         The backdrop pixmap already contains blur, tint, specular highlight,
-        chromatic aberration, refraction, vignette, noise, and rim light —
+        chromatic aberration, refraction, vignette, noise, and rim light --
         all composited in a single GPU shader pass. Only the 1px directional
         inner border is drawn on CPU (trivial cosmetic stroke).
         """

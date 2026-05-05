@@ -31,7 +31,9 @@ from PySide6.QtWidgets import (
 from shapely.geometry import MultiPolygon, Point, Polygon, mapping, shape
 
 from geotrace.ui.bridge import MapBridge
-from geotrace.ui.map_animation import MapViewAnimator, compute_fit_zoom_and_center
+from geotrace.ui.map_animation import (
+    MapViewAnimator, compute_fit_zoom_and_center, compute_fit_zoom_by_height,
+)
 from geotrace.ui.map_core import MercatorProjection, TileManager, MAX_ZOOM, MIN_ZOOM
 from geotrace.ui.marker_cluster import ClusterRenderer, GridClusterer, ThumbnailManager
 from geotrace.ui.theme import Colors, frosted_rgba, Metrics
@@ -259,9 +261,8 @@ class _MapCanvas(QOpenGLWidget):
         self._center_px = px
         self._center_py = py
         self._zoom = zoom
-        # 动画期间不复建路径，依靠 paintEvent 中的 scale 补偿；
-        # finished 信号已连接 _invalidate_paths，动画结束后自动重建精确路径。
         self._update_label_opacity_target()
+        self.viewChanged.emit()
         self.update()
 
     # ------------------------------------------------------------------
@@ -331,9 +332,9 @@ class _MapCanvas(QOpenGLWidget):
 
     def _compute_initial_view(self) -> None:
         min_lng, min_lat, max_lng, max_lat = _MAINLAND_BOUNDS
-        self._center_px, self._center_py, self._zoom = compute_fit_zoom_and_center(
-            min_lng, min_lat, max_lng, max_lat,
-            self.width(), self.height(),
+        mid_lng = (min_lng + max_lng) / 2.0
+        self._center_px, self._center_py, self._zoom = compute_fit_zoom_by_height(
+            min_lat, max_lat, mid_lng, self.height(),
         )
         self._update_label_opacity_target()
 
@@ -650,6 +651,7 @@ class _MapCanvas(QOpenGLWidget):
         self._clusterer.load_photos([])
         self.set_cluster_mode("badge")
         self._compute_initial_view()
+        self.viewChanged.emit()
         self.update()
 
     # ------------------------------------------------------------------
@@ -715,9 +717,8 @@ class MapWidget(QWidget):
             placeholder_color=_BG_COLOR,
             parent=self,
         )
-        self._tile_manager.tileLoaded.connect(self.update)
-
         self._canvas = _MapCanvas(self._tile_manager, self)
+        self._tile_manager.tileLoaded.connect(self._canvas.update)
         self._canvas.provinceClicked.connect(self._on_province_clicked)
         self._canvas.hoveredChanged.connect(self._on_hovered_changed)
         self._canvas.clusterClicked.connect(self.clusterClicked.emit)

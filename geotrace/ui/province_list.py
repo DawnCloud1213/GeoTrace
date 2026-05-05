@@ -1,7 +1,7 @@
 """左侧省份列表面板 — 浮动覆盖在地图上, 真实毛玻璃背板."""
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QStyledItemDelegate,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -18,7 +20,50 @@ from geotrace.ui.blur_engine import (
     FrostedSurfacePainter,
     generate_noise_pixmap_multiscale,
 )
-from geotrace.ui.theme import Colors, Fonts, Metrics
+from geotrace.ui.theme import Colors, Fonts, Metrics, CloseButton
+
+
+class _RoundedItemDelegate(QStyledItemDelegate):
+    """省份列表圆角药丸形 item 背景 — QSS 不支持 QListWidget::item 圆角."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._radius = 10
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = option.rect.adjusted(2, 1, -2, -1)
+
+        # 圆角背景 — 低不透明度融入毛玻璃
+        if option.state & QStyle.State_Selected:
+            bg = QColor(255, 204, 128, 180)
+        elif option.state & QStyle.State_MouseOver:
+            bg = QColor(255, 243, 224, 120)
+        elif index.row() % 2 == 1:
+            bg = QColor(255, 252, 250, 30)
+        else:
+            bg = QColor(255, 253, 250, 55)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._radius, self._radius)
+        painter.fillPath(path, bg)
+
+        # 文本
+        text = index.data(Qt.DisplayRole)
+        if text:
+            painter.setPen(QColor(Colors.TEXT_PRIMARY))
+            font = painter.font()
+            font.setPixelSize(13)
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, text)
+
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:
+        fm = option.fontMetrics
+        return QSize(200, fm.height() + 14)
 
 
 class ProvinceListPanel(QFrame):
@@ -62,29 +107,30 @@ class ProvinceListPanel(QFrame):
         header = QHBoxLayout()
         title = QLabel("省份")
         title.setFont(Fonts.title(11))
+        title.setProperty("cssClass", "sectionLabel")
         header.addWidget(title)
         header.addStretch()
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(24, 24)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setProperty("cssClass", "ghost")
+        close_btn = CloseButton()
         close_btn.clicked.connect(self.closeRequested.emit)
         header.addWidget(close_btn)
         layout.addLayout(header)
 
         # 列表 (半透明背景以融入毛玻璃)
         self._list = QListWidget()
+        self._list.setItemDelegate(_RoundedItemDelegate(self._list))
         self._list.setAlternatingRowColors(True)
         self._list.setStyleSheet(f"""
             QListWidget {{
-                border: 1px solid rgba(232,224,208,0.40);
-                border-radius: 4px;
-                background: rgba(250,250,245,0.50);
+                border: 1px solid rgba(232,224,208,0.50);
+                border-radius: 12px;
+                background: rgba(255,253,250,0.20);
                 font-size: 13px;
+                padding: 4px;
             }}
             QListWidget::item {{
-                padding: 5px 10px;
-                border-bottom: 1px solid rgba(232,224,208,0.30);
+                padding: 6px 12px;
+                border: none;
+                border-radius: 10px;
             }}
             QListWidget::item:hover {{
                 background: rgba(255,243,224,0.60);
