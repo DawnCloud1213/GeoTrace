@@ -21,6 +21,9 @@ geotrace_thumbnails/
 # PyInstaller
 *.spec
 
+# Crash logs
+_crash_*.log
+
 # OS
 Thumbs.db
 .DS_Store
