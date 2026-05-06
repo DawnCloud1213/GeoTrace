@@ -61,10 +61,6 @@ GeoTrace/
   → 双击大图查看（无级缩放 + 拖拽平移）
 ```
 
-## 截图
-
-![GeoTrace](ScreenShot_2026-05-02_232944_605.png)
-
 ## License
 
 MIT

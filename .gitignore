@@ -21,6 +21,9 @@ geotrace_thumbnails/
 # PyInstaller
 *.spec
 
+# Screenshots
+ScreenShot_*.png
+
 # Crash logs
 _crash_*.log
 
